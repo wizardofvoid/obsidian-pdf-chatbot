@@ -1,15 +1,15 @@
-# Obsidian & PDF Study Brain 🧠
+# Obsidian & PDF Study Brain
 
 A highly polished, premium Streamlit application that acts as a local RAG (Retrieval-Augmented Generation) brain for your study materials. It seamlessly blends knowledge from your personal **Obsidian Vault** and uploaded **PDF Textbooks** to provide highly contextual, cited answers to your questions.
 
 ## Features
 
-✨ **Premium Glassmorphic UI**: A stunning, custom-built minimalist dark theme featuring floating contextual sidebars, responsive chat pills, and custom SVG animations.
-📚 **Multi-Modal Knowledge**: Query against your PDF materials, your Obsidian markdown notes, or both simultaneously in Hybrid mode.
-🔄 **Incremental Syncing**: Intelligently syncs your Obsidian vault without rebuilding the entire index. It tracks modified times and only updates what has changed.
-⚡ **Local Vector Storage**: Uses FAISS for lightning-fast, entirely local vector similarity search.
-🎯 **Citation Tracking**: Every answer provided by the AI includes specific source citations (e.g., specific PDF pages or specific Obsidian note titles).
-📝 **Direct to Obsidian**: Features a one-click "Compile & Save to Obsidian" button that distills the AI's answer and saves it directly back into your vault as a permanently linked note.
+**Premium Glassmorphic UI**: A stunning, custom-built minimalist dark theme featuring floating contextual sidebars, responsive chat pills, and custom SVG animations.
+**Multi-Modal Knowledge**: Query against your PDF materials, your Obsidian markdown notes, or both simultaneously in Hybrid mode.
+**Incremental Syncing**: Intelligently syncs your Obsidian vault without rebuilding the entire index. It tracks modified times and only updates what has changed.
+**Local Vector Storage**: Uses FAISS for lightning-fast, entirely local vector similarity search.
+**Citation Tracking**: Every answer provided by the AI includes specific source citations (e.g., specific PDF pages or specific Obsidian note titles).
+**Direct to Obsidian**: Features a one-click "Compile & Save to Obsidian" button that distills the AI's answer and saves it directly back into your vault as a permanently linked note.
 
 ## Prerequisites
 
