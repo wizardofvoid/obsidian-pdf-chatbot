@@ -252,6 +252,106 @@ class RAGAgent:
         
         return is_list_intent and has_file_object
 
+    def _retrieve_context(self, standalone_query: str, mode: str = "pdf", citations: list | None = None) -> tuple[str, list]:
+        """Shared retrieval: meta-queries, PDF search, GraphRAG. Returns (context_text, chunks)."""
+        context_text = ""
+        chunks = []
+
+        # Check if this is a meta query asking to list available files/notes
+        if self._is_meta_query(standalone_query):
+            meta_context = []
+
+            # Check for checkbox task query scan first
+            if any(k in standalone_query.lower() for k in ["checkbox", "task", "todo", "to-do", "checklist", "incomplete", "completed", "checked", "unchecked"]):
+                from config import OBSIDIAN_VAULT_DIR
+                vault_path = Path(OBSIDIAN_VAULT_DIR)
+                if vault_path.exists():
+                    checkbox_notes = []
+                    for note_file in vault_path.glob("*.md"):
+                        try:
+                            note_content = note_file.read_text(encoding="utf-8")
+                            if "- [ ]" in note_content or "- [x]" in note_content:
+                                checkbox_notes.append(f"--- START NOTE: {note_file.name} ---\n{note_content}\n--- END NOTE: {note_file.name} ---")
+                                if citations is not None:
+                                    citations.append({"source": f"Obsidian: {note_file.name}", "page": "Task Note"})
+                        except Exception as e:
+                            logger.error("Error reading note '%s' for checkboxes: %s", note_file.name, e)
+                    if checkbox_notes:
+                        meta_context.append("### Obsidian Notes containing Checkboxes / Tasks:")
+                        meta_context.extend(checkbox_notes)
+                    else:
+                        meta_context.append("No notes with checkboxes or tasks were found in your Obsidian Vault.")
+                else:
+                    meta_context.append("Obsidian vault directory not found or configured.")
+            else:
+                # Regular meta query (list all available notes/PDFs)
+                if mode in ("pdf", "hybrid"):
+                    from config import INPUT_PDF_DIR
+                    pdf_path = Path(INPUT_PDF_DIR)
+                    if pdf_path.exists():
+                        pdfs = sorted([f.name for f in pdf_path.glob("*.pdf")])
+                        if pdfs:
+                            meta_context.append("### Available PDF Documents in Knowledge Base:")
+                            for p in pdfs:
+                                meta_context.append(f"- {p}")
+                            if citations is not None:
+                                for p in pdfs:
+                                    citations.append({"source": p, "page": "Document List"})
+                        else:
+                            meta_context.append("No PDF documents have been uploaded yet.")
+                    else:
+                        meta_context.append("No PDF documents have been uploaded yet.")
+
+                if mode in ("obsidian", "hybrid"):
+                    graph_rag = self._get_graph_rag()
+                    notes = sorted(graph_rag.available_notes)
+                    if notes:
+                        meta_context.append("### Available Obsidian Study Notes in Knowledge Base:")
+                        for n in notes:
+                            meta_context.append(f"- {n}")
+                        if citations is not None:
+                            for n in notes:
+                                citations.append({"source": f"Obsidian: {n}", "page": "Note List"})
+                    else:
+                        meta_context.append("No Obsidian study notes found in the knowledge graph cache.")
+
+            context_text = "\n\n".join(meta_context)
+            chunks = [context_text]
+        else:
+            # 1. Retrieve PDF context if mode is pdf or hybrid
+            if mode in ("pdf", "hybrid") and self.index_ready():
+                vectorstore = self._load_vectorstore()
+                docs_and_scores = vectorstore.similarity_search_with_score(standalone_query, k=RETRIEVAL_K)
+                filtered_docs = []
+                for doc, score in docs_and_scores:
+                    logger.info("Chunk source: %s pg %s, Score (L2 Distance): %.4f", doc.metadata.get('source'), doc.metadata.get('page'), score)
+                    if score <= 0.85:
+                        filtered_docs.append(doc)
+                        if citations is not None:
+                            citations.append({
+                                "source": doc.metadata.get("source"),
+                                "page": doc.metadata.get("page")
+                            })
+                chunks = [doc.page_content for doc in filtered_docs]
+                context_text = "\n\n".join(chunks)
+
+            # 2. Retrieve Obsidian GraphRAG context if mode is obsidian or hybrid
+            if mode in ("obsidian", "hybrid"):
+                graph_rag = self._get_graph_rag()
+                obs_res = graph_rag.retrieve_context(standalone_query)
+                obs_context = obs_res["context"]
+
+                if citations is not None:
+                    citations.extend(obs_res["citations"])
+
+                if mode == "hybrid":
+                    context_text = f"--- PDF STUDY MATERIAL CHUNKS ---\n{context_text}\n\n--- PERSONAL KNOWLEDGE GRAPH NOTES ---\n{obs_context}"
+                else:
+                    context_text = obs_context
+                    chunks = [obs_context]
+
+        return context_text, chunks
+
     def ask(self, question: str, session_id: str = "default_session", mode: str = "pdf", chat_history: list = None) -> ChatResult:
         if mode == "pdf" and not self.index_ready():
             return ChatResult(
@@ -261,91 +361,13 @@ class RAGAgent:
 
         try:
             chain = self._load_chain()
-            context_text = ""
-            chunks = []
-            
+
             # Reformulate conversational follow-ups into standalone search queries
             standalone_query = self._get_standalone_question(question, chat_history)
-            
-            # Check if this is a meta query asking to list available files/notes
-            if self._is_meta_query(standalone_query):
-                meta_context = []
-                
-                # Check for checkbox task query scan first
-                if any(k in standalone_query.lower() for k in ["checkbox", "task", "todo", "to-do", "checklist", "incomplete", "completed", "checked", "unchecked"]):
-                    from config import OBSIDIAN_VAULT_DIR
-                    vault_path = Path(OBSIDIAN_VAULT_DIR)
-                    if vault_path.exists():
-                        checkbox_notes = []
-                        for note_file in vault_path.glob("*.md"):
-                            try:
-                                note_content = note_file.read_text(encoding="utf-8")
-                                if "- [ ]" in note_content or "- [x]" in note_content:
-                                    checkbox_notes.append(f"--- START NOTE: {note_file.name} ---\n{note_content}\n--- END NOTE: {note_file.name} ---")
-                            except Exception as e:
-                                logger.error("Error reading note '%s' for checkboxes: %s", note_file.name, e)
-                        if checkbox_notes:
-                            meta_context.append("### Obsidian Notes containing Checkboxes / Tasks:")
-                            meta_context.extend(checkbox_notes)
-                        else:
-                            meta_context.append("No notes with checkboxes or tasks were found in your Obsidian Vault.")
-                    else:
-                        meta_context.append("Obsidian vault directory not found or configured.")
-                else:
-                    # Regular meta query (list all available notes/PDFs)
-                    if mode in ("pdf", "hybrid"):
-                        from config import INPUT_PDF_DIR
-                        pdf_path = Path(INPUT_PDF_DIR)
-                        if pdf_path.exists():
-                            pdfs = sorted([f.name for f in pdf_path.glob("*.pdf")])
-                            if pdfs:
-                                meta_context.append("### Available PDF Documents in Knowledge Base:")
-                                for p in pdfs:
-                                    meta_context.append(f"- {p}")
-                            else:
-                                meta_context.append("No PDF documents have been uploaded yet.")
-                        else:
-                            meta_context.append("No PDF documents have been uploaded yet.")
-                    
-                    if mode in ("obsidian", "hybrid"):
-                        graph_rag = self._get_graph_rag()
-                        notes = sorted(graph_rag.available_notes)
-                        if notes:
-                            meta_context.append("### Available Obsidian Study Notes in Knowledge Base:")
-                            for n in notes:
-                                meta_context.append(f"- {n}")
-                        else:
-                            meta_context.append("No Obsidian study notes found in the knowledge graph cache.")
-                
-                context_text = "\n\n".join(meta_context)
-                chunks = [context_text]
-            else:
-                # 1. Retrieve PDF context if mode is pdf or hybrid
-                if mode in ("pdf", "hybrid") and self.index_ready():
-                    vectorstore = self._load_vectorstore()
-                    # Perform search with scores (L2 distance: lower is closer)
-                    docs_and_scores = vectorstore.similarity_search_with_score(standalone_query, k=RETRIEVAL_K)
-                    filtered_docs = []
-                    for doc, score in docs_and_scores:
-                        logger.info("Chunk source: %s pg %s, Score (L2 Distance): %.4f", doc.metadata.get('source'), doc.metadata.get('page'), score)
-                        if score <= 0.85:
-                            filtered_docs.append(doc)
-                    chunks = [doc.page_content for doc in filtered_docs]
-                    pdf_context = "\n\n".join(chunks)
-                    context_text = pdf_context
-                    
-                # 2. Retrieve Obsidian GraphRAG context if mode is obsidian or hybrid
-                if mode in ("obsidian", "hybrid"):
-                    graph_rag = self._get_graph_rag()
-                    obs_res = graph_rag.retrieve_context(standalone_query)
-                    obs_context = obs_res["context"]
-                    
-                    if mode == "hybrid":
-                        context_text = f"--- PDF STUDY MATERIAL CHUNKS ---\n{context_text}\n\n--- PERSONAL KNOWLEDGE GRAPH NOTES ---\n{obs_context}"
-                    else:
-                        context_text = obs_context
-                        chunks = [obs_context]
-                    
+
+            # Delegate all retrieval to the shared method
+            context_text, chunks = self._retrieve_context(standalone_query, mode=mode)
+
             from langchain_core.messages import HumanMessage, AIMessage
             formatted_messages = []
             if chat_history:
@@ -354,7 +376,7 @@ class RAGAgent:
                         formatted_messages.append(HumanMessage(content=msg["content"]))
                     elif msg["role"] == "assistant":
                         formatted_messages.append(AIMessage(content=msg["content"]))
-                        
+
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -380,100 +402,13 @@ class RAGAgent:
 
         try:
             chain = self._load_chain()
-            context_text = ""
-            
+
             # Reformulate conversational follow-ups into standalone search queries
             standalone_query = self._get_standalone_question(question, chat_history)
-            
-            # Check if this is a meta query asking to list available files/notes
-            if self._is_meta_query(standalone_query):
-                meta_context = []
-                
-                # Check for checkbox task query scan first
-                if any(k in standalone_query.lower() for k in ["checkbox", "task", "todo", "to-do", "checklist", "incomplete", "completed", "checked", "unchecked"]):
-                    from config import OBSIDIAN_VAULT_DIR
-                    vault_path = Path(OBSIDIAN_VAULT_DIR)
-                    if vault_path.exists():
-                        checkbox_notes = []
-                        for note_file in vault_path.glob("*.md"):
-                            try:
-                                note_content = note_file.read_text(encoding="utf-8")
-                                if "- [ ]" in note_content or "- [x]" in note_content:
-                                    checkbox_notes.append(f"--- START NOTE: {note_file.name} ---\n{note_content}\n--- END NOTE: {note_file.name} ---")
-                                    if citations is not None:
-                                        citations.append({"source": f"Obsidian: {note_file.name}", "page": "Task Note"})
-                            except Exception as e:
-                                logger.error("Error reading note '%s' for checkboxes: %s", note_file.name, e)
-                        if checkbox_notes:
-                            meta_context.append("### Obsidian Notes containing Checkboxes / Tasks:")
-                            meta_context.extend(checkbox_notes)
-                        else:
-                            meta_context.append("No notes with checkboxes or tasks were found in your Obsidian Vault.")
-                    else:
-                        meta_context.append("Obsidian vault directory not found or configured.")
-                else:
-                    if mode in ("pdf", "hybrid"):
-                        from config import INPUT_PDF_DIR
-                        pdf_path = Path(INPUT_PDF_DIR)
-                        if pdf_path.exists():
-                            pdfs = sorted([f.name for f in pdf_path.glob("*.pdf")])
-                            if pdfs:
-                                meta_context.append("### Available PDF Documents in Knowledge Base:")
-                                for p in pdfs:
-                                    meta_context.append(f"- {p}")
-                                if citations is not None:
-                                    for p in pdfs:
-                                        citations.append({"source": p, "page": "Document List"})
-                            else:
-                                meta_context.append("No PDF documents have been uploaded yet.")
-                        else:
-                            meta_context.append("No PDF documents have been uploaded yet.")
-                    
-                    if mode in ("obsidian", "hybrid"):
-                        graph_rag = self._get_graph_rag()
-                        notes = sorted(graph_rag.available_notes)
-                        if notes:
-                            meta_context.append("### Available Obsidian Study Notes in Knowledge Base:")
-                            for n in notes:
-                                meta_context.append(f"- {n}")
-                            if citations is not None:
-                                for n in notes:
-                                    citations.append({"source": f"Obsidian: {n}", "page": "Note List"})
-                        else:
-                            meta_context.append("No Obsidian study notes found in the knowledge graph cache.")
-                
-                context_text = "\n\n".join(meta_context)
-            else:
-                # 1. Retrieve PDF context if mode is pdf or hybrid
-                if mode in ("pdf", "hybrid") and self.index_ready():
-                    vectorstore = self._load_vectorstore()
-                    docs_and_scores = vectorstore.similarity_search_with_score(standalone_query, k=RETRIEVAL_K)
-                    filtered_docs = []
-                    for doc, score in docs_and_scores:
-                        logger.info("Chunk source: %s pg %s, Score (L2 Distance): %.4f", doc.metadata.get('source'), doc.metadata.get('page'), score)
-                        if score <= 0.85:
-                            filtered_docs.append(doc)
-                            if citations is not None:
-                                citations.append({
-                                    "source": doc.metadata.get("source"),
-                                    "page": doc.metadata.get("page")
-                                })
-                    context_text = "\n\n".join([doc.page_content for doc in filtered_docs])
-                    
-                # 2. Retrieve Obsidian GraphRAG context if mode is obsidian or hybrid
-                if mode in ("obsidian", "hybrid"):
-                    graph_rag = self._get_graph_rag()
-                    obs_res = graph_rag.retrieve_context(standalone_query)
-                    obs_context = obs_res["context"]
-                    
-                    if citations is not None:
-                        citations.extend(obs_res["citations"])
-                        
-                    if mode == "hybrid":
-                        context_text = f"--- PDF STUDY MATERIAL CHUNKS ---\n{context_text}\n\n--- PERSONAL KNOWLEDGE GRAPH NOTES ---\n{obs_context}"
-                    else:
-                        context_text = obs_context
-                        
+
+            # Delegate all retrieval to the shared method (pass citations for inline population)
+            context_text, _ = self._retrieve_context(standalone_query, mode=mode, citations=citations)
+
             from langchain_core.messages import HumanMessage, AIMessage
             formatted_messages = []
             if chat_history:
@@ -482,7 +417,7 @@ class RAGAgent:
                         formatted_messages.append(HumanMessage(content=msg["content"]))
                     elif msg["role"] == "assistant":
                         formatted_messages.append(AIMessage(content=msg["content"]))
-                        
+
             max_retries = 3
             for attempt in range(max_retries):
                 try:
@@ -490,14 +425,14 @@ class RAGAgent:
                     stream = chain.stream(
                         {"input": question, "context": context_text, "history": formatted_messages}
                     )
-                    
+
                     # Pre-fetch the first chunk to catch rate-limit connection errors early
                     iterator = iter(stream)
                     try:
                         first_chunk = next(iterator)
                     except StopIteration:
                         return
-                    
+
                     yield first_chunk
                     for chunk in iterator:
                         yield chunk
