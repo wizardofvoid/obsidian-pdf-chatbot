@@ -39,6 +39,7 @@ class RAGAgent:
         self._chain: RunnableWithMessageHistory | None = None
         self._session_store: dict[str, InMemoryChatMessageHistory] = {}
         self._graph_rag = None
+        self._current_key_idx = 1
 
     def _get_graph_rag(self):
         if self._graph_rag is None:
@@ -87,12 +88,24 @@ class RAGAgent:
 
     def _get_groq_key(self) -> str:
         key = os.getenv("GROQ_API_KEY")
-        if not key:
-            for i in range(1, 10):
-                k = os.getenv(f"GROQ_API_KEY_{i}")
-                if k:
-                    return k
-        return key
+        if key:
+            return key
+        k = os.getenv(f"GROQ_API_KEY_{self._current_key_idx}")
+        if k:
+            return k
+        return os.getenv("GROQ_API_KEY_1")
+
+    def rotate_groq_key(self) -> bool:
+        """Switches to the next available GROQ_API_KEY index. Returns True if successfully rotated."""
+        old_idx = self._current_key_idx
+        for offset in range(1, 10):
+            next_idx = ((old_idx + offset - 1) % 9) + 1
+            if os.getenv(f"GROQ_API_KEY_{next_idx}"):
+                self._current_key_idx = next_idx
+                self._chain = None  # Force re-loading the chain with the new key!
+                print(f"[RAGAgent Key Rotation] Rotated key index: {old_idx} -> {self._current_key_idx}")
+                return True
+        return False
 
     def _load_chain(self) -> Any:
         if self._chain is None:
@@ -159,37 +172,82 @@ class RAGAgent:
             elif msg["role"] == "assistant":
                 formatted_messages.append(AIMessage(content=msg["content"]))
 
-        try:
-            api_key = self._get_groq_key()
-            if not api_key:
-                return question
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                api_key = self._get_groq_key()
+                if not api_key:
+                    return question
 
-            llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", max_tokens=256)
-            
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", "Given a chat history and the latest user question which might reference context in the chat history, formulate a standalone question which can be understood without the chat history. Do NOT answer the question, just reformulate it if needed and otherwise return it as is. Respond with ONLY the reformulated question text."),
-                MessagesPlaceholder("history"),
-                ("human", "{input}")
-            ])
-            
-            chain = prompt | llm | StrOutputParser()
-            standalone = chain.invoke({"history": formatted_messages, "input": question})
-            print(f"[RAGAgent] Reformulated conversational query: '{question}' -> '{standalone.strip()}'")
-            return standalone.strip()
-        except Exception as e:
-            print(f"[RAGAgent Error] Failed to reformulate conversational query: {e}")
-            return question
+                llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", max_tokens=256)
+                
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", (
+                        "Given a chat history and the latest user question which might reference context in the chat history, "
+                        "formulate a short standalone search query of key terms that can be used to search a vector database. "
+                        "CRITICAL: Do NOT write an answer, greeting, explanation, or career advice. Do NOT write conversational text. "
+                        "Return ONLY the search query keywords (maximum 10 words). "
+                        "Example: If the user says 'I want you to guide me in my career', return 'software developer career guidance resume'. "
+                        "Respond with ONLY the optimized search terms."
+                    )),
+                    MessagesPlaceholder("history"),
+                    ("human", "{input}")
+                ])
+                
+                chain = prompt | llm | StrOutputParser()
+                standalone = chain.invoke({"history": formatted_messages, "input": question})
+                print(f"[RAGAgent] Reformulated conversational query: '{question}' -> '{standalone.strip()}'")
+                return standalone.strip()
+            except Exception as e:
+                err_str = str(e)
+                if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
+                    print(f"[RAGAgent Rate Limit] Standalone query hit rate limit on attempt {attempt + 1}. Rotating key and retrying...")
+                    if self.rotate_groq_key():
+                        continue
+                print(f"[RAGAgent Error] Failed to reformulate conversational query: {e}")
+                return question
 
     def _is_meta_query(self, question: str) -> bool:
         q = question.lower()
-        # Intent words: list, show, tell, what, which, print, display, name, find, access, active
-        # Object words: file, note, document, pdf, vault, book, textbook, paper, material, graph, knowledge
-        has_intent = any(k in q for k in ["list", "show", "tell", "what", "which", "print", "display", "name", "access to", "do you have", "have access", "status of", "get my"])
-        has_object = any(o in q for o in ["file", "note", "document", "pdf", "vault", "book", "textbook", "paper", "material", "graph", "knowledge"])
         
-        # Checkbox queries are also meta-queries that scan vault structure
+        # Checkbox queries are always meta-queries that scan vault structure
         is_checkbox_query = any(k in q for k in ["checkbox", "task", "todo", "to-do", "check list", "checklist", "incomplete", "completed", "checked", "unchecked"])
-        return (has_intent and has_object) or is_checkbox_query
+        if is_checkbox_query:
+            return True
+            
+        # If the user is explicitly asking for content details or about a topic, it is a content query, not a meta listing
+        if any(k in q for k in ["content", "written in", "inside", "explain", "summarize", "about"]):
+            return False
+            
+        # If the user mentions a specific note or PDF by name, perform a normal RAG content search
+        try:
+            # Check Obsidian notes
+            graph_rag = self._get_graph_rag()
+            for note in graph_rag.available_notes:
+                note_name = note.lower()
+                if note_name.endswith('.md'):
+                    note_name = note_name[:-3]
+                if len(note_name) > 3 and note_name in q:
+                    return False
+            # Check PDFs
+            from config import INPUT_PDF_DIR
+            from pathlib import Path
+            for pdf_file in Path(INPUT_PDF_DIR).glob("*.pdf"):
+                pdf_name = pdf_file.stem.lower()
+                if len(pdf_name) > 3 and pdf_name in q:
+                    return False
+        except Exception:
+            pass
+
+        # Generic meta-queries ask to list, count, show, or check access to files
+        is_list_intent = any(k in q for k in [
+            "list", "show", "what notes", "what pdf", "what file", "what document", 
+            "which notes", "which pdf", "which file", "which document", 
+            "do you have", "have access", "status of", "available notes", "available pdf"
+        ])
+        has_file_object = any(o in q for o in ["file", "note", "document", "pdf", "vault", "textbook", "material", "graph", "knowledge"])
+        
+        return is_list_intent and has_file_object
 
     def ask(self, question: str, session_id: str = "default_session", mode: str = "pdf", chat_history: list = None) -> ChatResult:
         if mode == "pdf" and not self.index_ready():
@@ -294,10 +352,21 @@ class RAGAgent:
                     elif msg["role"] == "assistant":
                         formatted_messages.append(AIMessage(content=msg["content"]))
                         
-            answer = chain.invoke(
-                {"input": question, "context": context_text, "history": formatted_messages}
-            )
-            return ChatResult(answer=answer, context_chunks=chunks)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    chain = self._load_chain()
+                    answer = chain.invoke(
+                        {"input": question, "context": context_text, "history": formatted_messages}
+                    )
+                    return ChatResult(answer=answer, context_chunks=chunks)
+                except Exception as e:
+                    err_str = str(e)
+                    if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
+                        print(f"[RAGAgent Rate Limit] Hit rate limit on attempt {attempt + 1}. Rotating key and retrying...")
+                        if self.rotate_groq_key():
+                            continue
+                    raise e
         except Exception as e:
             return ChatResult(answer="", error=str(e))
 
@@ -411,10 +480,33 @@ class RAGAgent:
                     elif msg["role"] == "assistant":
                         formatted_messages.append(AIMessage(content=msg["content"]))
                         
-            for chunk in chain.stream(
-                {"input": question, "context": context_text, "history": formatted_messages}
-            ):
-                yield chunk
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    chain = self._load_chain()
+                    stream = chain.stream(
+                        {"input": question, "context": context_text, "history": formatted_messages}
+                    )
+                    
+                    # Pre-fetch the first chunk to catch rate-limit connection errors early
+                    iterator = iter(stream)
+                    try:
+                        first_chunk = next(iterator)
+                    except StopIteration:
+                        return
+                    
+                    yield first_chunk
+                    for chunk in iterator:
+                        yield chunk
+                    return  # Success
+                except Exception as e:
+                    err_str = str(e)
+                    if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
+                        print(f"[RAGAgent Rate Limit] Stream hit rate limit on attempt {attempt + 1}. Rotating key and retrying...")
+                        if self.rotate_groq_key():
+                            continue
+                    yield f"[ERROR] {err_str}"
+                    return
         except Exception as e:
             yield f"[ERROR] {str(e)}"
 
@@ -429,40 +521,51 @@ class RAGAgent:
         from linker_trigger import trigger_obsidian_linker
         
         try:
-            api_key = self._get_groq_key()
-            if not api_key:
-                return {"success": False, "error": "GROQ_API_KEY not found in environment."}
-
-            llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", max_tokens=1500)
-            
-            prompt_distill = ChatPromptTemplate.from_messages([
-                ("system", "You are an expert study note compiler. Your job is to distill a Q&A exchange about study materials into a beautifully structured, highly readable, atomic Obsidian study note. Focus strictly on clarity and concise markdown formatting."),
-                ("user", """User Question: {question}
-Chatbot Answer: {answer}
-Citations: {citations}
- 
-YOUR TASK:
-Compile this exchange into a single atomic study note in Markdown format.
- 
-Required Structure:
-1. YAML Frontmatter: Enclosed in '---' containing:
-   - title: A concise, clear 3-5 word note title (without special characters or file extensions).
-   - tags: A list of 2-4 study category tags (prefixed with '#', e.g., '#dsa', '#algorithms').
-   - summary: A brief 1-2 sentence high-level summary of the concepts.
-2. Note Body: Clean Markdown with headers, bullet points, explanations, formulas, or code blocks.
-3. Citations / Sources: A dedicated section at the bottom citing the source materials used (e.g. 'Source: Book.pdf, page 45').
- 
-CRITICAL RULES:
-- **Active Wikilinking**: If the 'Citations' list contains any cited Obsidian notes (e.g., 'Obsidian: Search in 2D matrix.md'), you MUST include active Obsidian wiki-links pointing to them (e.g., `[[Search in 2D matrix]]` - do not include the `.md` extension in the link) inside the body or the sources section of the new note! This is highly critical to connect your new note directly to its parent sources.
-- **Output Only Note**: Your entire output must start with the YAML '---' and contain ONLY the compiled markdown note. Do not include any chat preface, conversational preamble, or markdown wrapper code blocks. Make the title extremely concise as it will be used as the filename.""")
-            ])
-            
-            chain = prompt_distill | llm | StrOutputParser()
-            note_content = chain.invoke({
-                "question": question,
-                "answer": answer,
-                "citations": str(citations)
-            })
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    api_key = self._get_groq_key()
+                    if not api_key:
+                        return {"success": False, "error": "GROQ_API_KEY not found in environment."}
+        
+                    llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", max_tokens=1500)
+                    
+                    prompt_distill = ChatPromptTemplate.from_messages([
+                        ("system", "You are an expert study note compiler. Your job is to distill a Q&A exchange about study materials into a beautifully structured, highly readable, atomic Obsidian study note. Focus strictly on clarity and concise markdown formatting."),
+                        ("user", """User Question: {question}
+        Chatbot Answer: {answer}
+        Citations: {citations}
+         
+        YOUR TASK:
+        Compile this exchange into a single atomic study note in Markdown format.
+         
+        Required Structure:
+        1. YAML Frontmatter: Enclosed in '---' containing:
+           - title: A concise, clear 3-5 word note title (without special characters or file extensions).
+           - tags: A list of 2-4 study category tags (prefixed with '#', e.g., '#dsa', '#algorithms').
+           - summary: A brief 1-2 sentence high-level summary of the concepts.
+        2. Note Body: Clean Markdown with headers, bullet points, explanations, formulas, or code blocks.
+        3. Citations / Sources: A dedicated section at the bottom citing the source materials used (e.g. 'Source: Book.pdf, page 45').
+         
+        CRITICAL RULES:
+        - **Active Wikilinking**: If the 'Citations' list contains any cited Obsidian notes (e.g., 'Obsidian: Search in 2D matrix.md'), you MUST include active Obsidian wiki-links pointing to them (e.g., `[[Search in 2D matrix]]` - do not include the `.md` extension in the link) inside the body or the sources section of the new note! This is highly critical to connect your new note directly to its parent sources.
+        - **Output Only Note**: Your entire output must start with the YAML '---' and contain ONLY the compiled markdown note. Do not include any chat preface, conversational preamble, or markdown wrapper code blocks. Make the title extremely concise as it will be used as the filename.""")
+                    ])
+                    
+                    chain = prompt_distill | llm | StrOutputParser()
+                    note_content = chain.invoke({
+                        "question": question,
+                        "answer": answer,
+                        "citations": str(citations)
+                    })
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
+                        print(f"[RAGAgent Rate Limit] Note compilation hit rate limit. Rotating key and retrying...")
+                        if self.rotate_groq_key():
+                            continue
+                    return {"success": False, "error": f"Failed to distill note: {err_str}"}
             
             # Extract title from the YAML frontmatter
             title_match = re.search(r'title:\s*["\']?(.*?)["\']?\n', note_content)
@@ -518,3 +621,109 @@ CRITICAL RULES:
                 return {"success": False, "error": "Re-indexing process failed. Check terminal logs."}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def transcribe_audio(self, audio_bytes: bytes, format: str = "webm", translate: bool = False) -> str:
+        """
+        Sends audio bytes containing Indian languages to Groq's Whisper API.
+        If translate is True, uses the translations endpoint to get English text.
+        Otherwise, uses transcriptions endpoint to get text in the native script.
+        """
+        import requests
+        
+        try:
+            api_key = self._get_groq_key()
+            if not api_key:
+                print("[RAGAgent STT] Error: GROQ_API_KEY not found in environment.")
+                return ""
+            
+            if format.startswith("."):
+                format = format[1:]
+            
+            filename = f"audio.{format}"
+            mime_type = f"audio/{format}"
+            
+            endpoint = "translations" if translate else "transcriptions"
+            url = f"https://api.groq.com/openai/v1/audio/{endpoint}"
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            files = {
+                "file": (filename, audio_bytes, mime_type)
+            }
+            
+            # Whisper prompt to guide transcription/translation of Indian languages
+            prompt_instruction = (
+                "The audio contains ONLY Indian language speech (like Hindi, Gujarati, Tamil, Telugu, Bengali, Kannada, Marathi, Hinglish, etc.) or English. "
+                "Do NOT transcribe as other global languages (e.g. Chinese, Spanish, Welsh, etc.). "
+                "Please transcribe the speech accurately in the spoken language's original script or English."
+                if not translate else
+                "The audio contains ONLY Indian language speech (like Hindi, Gujarati, Tamil, Telugu, Bengali, Kannada, Marathi, Hinglish, etc.) or English. "
+                "Please translate this speech accurately into standard English text."
+            )
+            
+            data = {
+                "model": "whisper-large-v3",
+                "prompt": prompt_instruction,
+                "response_format": "json"
+            }
+            
+            print(f"[RAGAgent STT] Sending {len(audio_bytes)} bytes to Groq Whisper {endpoint} API...")
+            response = requests.post(url, headers=headers, files=files, data=data, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            transcription = result.get("text", "").strip()
+            print(f"[RAGAgent STT] Result: '{transcription}'")
+            return transcription
+            
+        except Exception as e:
+            print(f"[RAGAgent STT Error]: Failed to transcribe/translate audio: {e}")
+            return ""
+
+    def get_index_status(self) -> dict:
+        """
+        Compares active PDFs on disk with currently indexed PDFs in FAISS.
+        Returns a status dictionary.
+        """
+        from config import INPUT_PDF_DIR, VECTORSTORE_DIR
+        from pathlib import Path
+        
+        pdf_paths = sorted(Path(INPUT_PDF_DIR).glob("*.pdf"))
+        active_files = {p.name for p in pdf_paths}
+        
+        indexed_files = set()
+        if self.index_ready():
+            try:
+                vs = self._load_vectorstore()
+                if vs and hasattr(vs, "docstore") and hasattr(vs.docstore, "_dict"):
+                    indexed_files = {
+                        doc.metadata.get("source")
+                        for doc in vs.docstore._dict.values()
+                        if doc.metadata.get("source")
+                    }
+            except Exception as e:
+                print(f"[RAGAgent status error] {e}")
+        
+        # Check modification times
+        to_add = list(active_files - indexed_files)
+        to_delete = list(indexed_files - active_files)
+        
+        # Also check modified files
+        index_mtime = (VECTORSTORE_DIR / "index.faiss").stat().st_mtime if self.index_ready() else 0.0
+        for p in pdf_paths:
+            if p.name in indexed_files:
+                if p.stat().st_mtime > index_mtime:
+                    to_add.append(p.name)
+                    
+        needs_sync = bool(to_add or to_delete)
+        return {
+            "active_files": sorted(list(active_files)),
+            "indexed_files": sorted(list(indexed_files)),
+            "needs_sync": needs_sync,
+            "to_add": sorted(list(set(to_add))),
+            "to_delete": sorted(list(set(to_delete)))
+        }
+
+

@@ -112,9 +112,9 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
     docs = splitter.create_documents(texts, metadatas=metadatas)
     return docs
 
-def create_and_save_vectorstore(docs: list[Document]):
+def create_vectorstore(docs: list[Document]):
     """
-    Generates embeddings for documents and saves them with metadata in a local FAISS vector store.
+    Generates embeddings for documents and creates an in-memory FAISS vector store.
     """
     if not docs:
         return None
@@ -177,9 +177,6 @@ def create_and_save_vectorstore(docs: list[Document]):
             embedding=embeddings_model,
             metadatas=metadatas
         )
-        
-        vectorstore.save_local(str(VECTORSTORE_DIR))
-        print(f"[SUCCESS] FAISS vector store successfully saved to '{VECTORSTORE_DIR}' directory!")
         
         return vectorstore
     except Exception as e:
@@ -283,7 +280,7 @@ def main() -> bool:
             print(f"[SUCCESS] Generated {len(chunks)} chunks to index.")
             print("[INFO] Building embeddings for new chunks...")
             
-            temp_vectorstore = create_and_save_vectorstore(chunks)
+            temp_vectorstore = create_vectorstore(chunks)
             if not temp_vectorstore:
                 print("[ERROR] Failed to generate embeddings for new chunks.")
                 return False

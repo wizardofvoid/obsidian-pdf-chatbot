@@ -1,5 +1,6 @@
 import streamlit as st
 from rag_agent import RAGAgent
+from streamlit_mic_recorder import mic_recorder
 
 @st.cache_resource
 def get_agent() -> RAGAgent:
@@ -244,6 +245,8 @@ def main():
     st.title("Obsidian & PDF Study Brain")
     
     agent = get_agent()
+    audio = None
+    voice_mode = "Translate to English"
     
     missing = agent.missing_env_vars()
     if missing:
@@ -281,6 +284,20 @@ def main():
                         st.error(f"Sync failed: {res['error']}")
                         
         st.markdown("---")
+        st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Voice Assistant</h3>", unsafe_allow_html=True)
+        voice_mode = st.selectbox(
+            "Voice input mode:",
+            options=["Translate to English", "Original Language (Transcription)"],
+            index=0
+        )
+        audio = mic_recorder(
+            start_prompt=" Start Speaking",
+            stop_prompt=" Stop & Submit",
+            key="mic_recorder",
+            use_container_width=True
+        )
+        
+        st.markdown("---")
         st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>1. Upload PDF Materials</h3>", unsafe_allow_html=True)
         uploaded_files = st.file_uploader(
             "Upload one or more PDFs", type=["pdf"], accept_multiple_files=True
@@ -291,6 +308,9 @@ def main():
         if "prev_uploaded_files" not in st.session_state:
             st.session_state["prev_uploaded_files"] = []
             
+        saved_names = []
+        removed_names = []
+        
         # Sync PDFs in storage with files currently uploaded in Streamlit
         if uploaded_files or st.session_state["prev_uploaded_files"]:
             from pathlib import Path
@@ -300,7 +320,6 @@ def main():
             input_dir.mkdir(exist_ok=True, parents=True)
             
             # Save new uploads
-            saved_names = []
             for uploaded_file in uploaded_files:
                 file_path = input_dir / uploaded_file.name
                 if not file_path.exists():
@@ -311,7 +330,6 @@ def main():
                 st.success(f"Saved: {', '.join(saved_names)}")
                 
             # Remove deleted uploads
-            removed_names = []
             for existing_file in input_dir.glob("*.pdf"):
                 if existing_file.name in st.session_state["prev_uploaded_files"] and existing_file.name not in uploaded_file_names:
                     existing_file.unlink()
@@ -327,15 +345,55 @@ def main():
             st.session_state["prev_uploaded_files"] = uploaded_file_names
             
         st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>2. Knowledge Indexing</h3>", unsafe_allow_html=True)
-        skip_ocr = st.checkbox("Skip Image OCR (Fast Mode)", value=True)
-        if st.button("Extract & Build Index", use_container_width=True):
-            with st.spinner("Extracting text and building vector index..."):
+        
+        # Ingest state checks
+        status = agent.get_index_status()
+        
+        # Determine configuration options
+        skip_ocr = st.checkbox("Skip Image OCR (Fast Mode)", value=True, key="skip_ocr")
+        auto_sync = st.checkbox("Auto-Sync on upload/delete", value=True, key="auto_sync")
+        
+        if auto_sync and (saved_names or removed_names):
+            with st.spinner("Auto-synchronizing vector index..."):
+                ok = agent.run_ingestion(skip_ocr=skip_ocr)
+            if ok:
+                st.toast("⚡ Index synchronized successfully!")
+                st.cache_resource.clear()
+                st.rerun()
+            else:
+                st.error("Auto-sync failed.")
+        
+        # Display Index Status Panel
+        if not status["active_files"]:
+            st.info("No PDF files uploaded yet. Add some PDFs above.")
+        else:
+            if status["needs_sync"]:
+                st.warning("⚠️ Vector index is out of sync.")
+                if status["to_add"]:
+                    st.markdown("**Pending additions/updates:**")
+                    for f in status["to_add"]:
+                        st.markdown(f"<span style='color: #E2B714; font-size: 0.85rem;'>➕ {f}</span>", unsafe_allow_html=True)
+                if status["to_delete"]:
+                    st.markdown("**Pending removals:**")
+                    for f in status["to_delete"]:
+                        st.markdown(f"<span style='color: #F87171; font-size: 0.85rem;'>➖ {f}</span>", unsafe_allow_html=True)
+            else:
+                st.success("✅ Index is perfectly synchronized!")
+                st.markdown("**Currently Indexed PDFs:**")
+                for f in status["indexed_files"]:
+                    st.markdown(f"<span style='color: #10B981; font-size: 0.85rem;'>📄 {f}</span>", unsafe_allow_html=True)
+                    
+        st.markdown("")
+        # Manual Trigger Button
+        if st.button("Extract & Sync Index Manually", use_container_width=True):
+            with st.spinner("Synchronizing vector index..."):
                 ok = agent.run_ingestion(skip_ocr=skip_ocr)
             st.cache_resource.clear()
             if ok:
-                st.success("FAISS Vector Index is ready!")
+                st.success("FAISS Vector Index updated!")
+                st.rerun()
             else:
-                st.error("Index build failed. Check logs and try again.")
+                st.error("Index synchronization failed.")
                 
         st.markdown("---")
         if st.button("Clear Chat History", use_container_width=True):
@@ -407,6 +465,28 @@ def main():
         st.stop()
         
     question = st.chat_input("Ask a question about your documents...")
+    
+    if not question and audio:
+        import hashlib
+        audio_hash = hashlib.md5(audio['bytes']).hexdigest()
+        if st.session_state.get("last_processed_audio") != audio_hash:
+            st.session_state["last_processed_audio"] = audio_hash
+            
+            with st.spinner("Processing speech..."):
+                translate = (voice_mode == "Translate to English")
+                ext = audio.get("format", "webm")
+                transcribed_text = agent.transcribe_audio(
+                    audio_bytes=audio["bytes"],
+                    format=ext,
+                    translate=translate
+                )
+                
+            if transcribed_text.strip():
+                question = transcribed_text.strip()
+                st.toast(f"🗣️ Heard: {question}")
+            else:
+                st.warning("Could not recognize any speech. Please try again.")
+                
     if not question:
         return
         

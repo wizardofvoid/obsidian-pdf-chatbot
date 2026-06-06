@@ -11,3 +11,4 @@ langchain-groq>=0.1.0
 faiss-cpu>=1.8.0
 google-genai>=0.1.0
 tiktoken>=0.6.0
+streamlit-mic-recorder>=0.1.4
