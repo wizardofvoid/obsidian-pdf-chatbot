@@ -1,7 +1,10 @@
 import os
 import sys
 import subprocess
-from config import OBSIDIAN_VAULT_DIR
+import logging
+from config import OBSIDIAN_VAULT_DIR, OBSIDIAN_LINKER_PATH
+
+logger = logging.getLogger(__name__)
 
 def trigger_obsidian_linker() -> bool:
     """
@@ -9,10 +12,10 @@ def trigger_obsidian_linker() -> bool:
     Uses the active python interpreter to maintain the conda environment context.
     Passes the configured Obsidian vault path dynamically.
     """
-    linker_main = r"c:\Users\saraf\Desktop\projects\obsidian-linker\main.py"
+    linker_main = str(OBSIDIAN_LINKER_PATH)
     
-    if not os.path.exists(linker_main):
-        print(f"[Linker Trigger Error] Obsidian Linker main.py not found at: {linker_main}")
+    if not OBSIDIAN_LINKER_PATH.exists():
+        logger.error("Obsidian Linker main.py not found at: %s", OBSIDIAN_LINKER_PATH)
         return False
         
     try:
@@ -29,10 +32,10 @@ def trigger_obsidian_linker() -> bool:
             env=env,
             close_fds=True if os.name != 'nt' else False
         )
-        print(f"[Linker Trigger] Obsidian Linker triggered successfully in background for: {OBSIDIAN_VAULT_DIR}")
+        logger.info("Obsidian Linker triggered successfully in background for: %s", OBSIDIAN_VAULT_DIR)
         return True
     except Exception as e:
-        print(f"[Linker Trigger Error] Failed to launch background linker: {e}")
+        logger.error("Failed to launch background linker: %s", e)
         return False
 
 def run_obsidian_linker_sync() -> bool:
@@ -41,14 +44,14 @@ def run_obsidian_linker_sync() -> bool:
     Maintains the conda environment context.
     Passes the configured Obsidian vault path dynamically.
     """
-    linker_main = r"c:\Users\saraf\Desktop\projects\obsidian-linker\main.py"
+    linker_main = str(OBSIDIAN_LINKER_PATH)
     
-    if not os.path.exists(linker_main):
-        print(f"[Linker Trigger Error] Obsidian Linker main.py not found at: {linker_main}")
+    if not OBSIDIAN_LINKER_PATH.exists():
+        logger.error("Obsidian Linker main.py not found at: %s", OBSIDIAN_LINKER_PATH)
         return False
         
     try:
-        print(f"[Linker Trigger] Starting synchronous Obsidian Linker run for: {OBSIDIAN_VAULT_DIR}...")
+        logger.info("Starting synchronous Obsidian Linker run for: %s...", OBSIDIAN_VAULT_DIR)
         env = {**os.environ, "OBSIDIAN_VAULT_DIR": str(OBSIDIAN_VAULT_DIR)}
         args = [sys.executable, linker_main, "--dir", str(OBSIDIAN_VAULT_DIR)]
         
@@ -60,17 +63,17 @@ def run_obsidian_linker_sync() -> bool:
             text=True
         )
         if result.returncode == 0:
-            print("[Linker Trigger] Obsidian Linker completed successfully.")
+            logger.info("Obsidian Linker completed successfully.")
             return True
         else:
-            print(f"[Linker Trigger Error] Linker failed with code {result.returncode}: {result.stderr}")
+            logger.error("Linker failed with code %s: %s", result.returncode, result.stderr)
             return False
     except Exception as e:
-        print(f"[Linker Trigger Error] Failed to run linker synchronously: {e}")
+        logger.error("Failed to run linker synchronously: %s", e)
         return False
 
 if __name__ == "__main__":
     # Test execution in isolation
-    print("Testing linker trigger...")
+    logger.info("Testing linker trigger...")
     success = trigger_obsidian_linker()
-    print(f"Trigger result: {success}")
+    logger.info("Trigger result: %s", success)

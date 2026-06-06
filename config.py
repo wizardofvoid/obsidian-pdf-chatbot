@@ -27,6 +27,7 @@ OUTPUT_TEXT = OUTPUT_DIR / "output.txt"
 # Fallback to an 'ObsidianVault' folder inside the project if not set in .env
 OBSIDIAN_VAULT_DIR = Path(os.getenv("OBSIDIAN_VAULT_DIR", str(BASE_DIR / "ObsidianVault")))
 OBSIDIAN_CACHE_FILE = OBSIDIAN_VAULT_DIR / ".linker_cache.json"
+OBSIDIAN_LINKER_PATH: Path = Path(os.getenv("OBSIDIAN_LINKER_PATH", str(BASE_DIR.parent / "obsidian-linker" / "main.py")))
 
 # Local vector index storage
 VECTORSTORE_DIR = BASE_DIR / "faiss_index"
