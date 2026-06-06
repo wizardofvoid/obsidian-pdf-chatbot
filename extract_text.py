@@ -1,4 +1,5 @@
 import io
+import logging
 import tempfile
 from pathlib import Path
 import concurrent.futures
@@ -8,6 +9,8 @@ from PIL import Image
 
 import image_text
 from config import INPUT_PDF_DIR, OUTPUT_DIR, OUTPUT_TEXT, MIN_IMAGE_SIZE
+
+logger = logging.getLogger(__name__)
 
 OUTPUT_FILE = OUTPUT_TEXT.name
 
@@ -41,7 +44,7 @@ def extract_page_hybrid(page, doc, temp_dir: Path, skip_ocr: bool = False) -> st
             if table_markdown:
                 parts.append(f"\n[Table — page {page.number + 1}, table {i + 1}]\n{table_markdown}")
     except Exception as e:
-        print(f"[WARNING] Table extraction failed (page {page.number + 1}): {e}")
+        logger.warning("Table extraction failed (page %s): %s", page.number + 1, e)
 
     if skip_ocr:
         return "\n\n".join(parts)
@@ -66,15 +69,12 @@ def extract_page_hybrid(page, doc, temp_dir: Path, skip_ocr: bool = False) -> st
             temp_path = temp_dir / f"page_{page.number + 1}_img_{img_index + 1}.{image_ext}"
             temp_path.write_bytes(image_bytes)
 
-            print(
-                f"[INFO] Page {page.number + 1}: running image OCR "
-                f"({img_index + 1}/{len(images)})..."
-            )
+            logger.info("Page %s: running image OCR (%s/%s)...", page.number + 1, img_index + 1, len(images))
             ocr_text = image_text.extract_text_image(str(temp_path)).strip()
             if ocr_text:
                 return f"\n[Image text — page {page.number + 1}, image {img_index + 1}]\n{ocr_text}"
         except Exception as e:
-            print(f"[WARNING] Image OCR skipped (page {page.number + 1}, image {img_index + 1}): {e}")
+            logger.warning("Image OCR skipped (page %s, image %s): %s", page.number + 1, img_index + 1, e)
         return None
 
     # Run image OCR requests concurrently (up to 4 workers to balance rate limits and speed)
@@ -94,7 +94,7 @@ def extract_page_worker(pdf_path: Path, page_num: int, temp_dir_path: Path, skip
             page_text = extract_page_hybrid(page, doc, temp_dir_path, skip_ocr=skip_ocr)
             return page_num, page_text
     except Exception as e:
-        print(f"[ERROR] Failed to extract page {page_num} for {pdf_path.name}: {e}")
+        logger.error("Failed to extract page %s for %s: %s", page_num, pdf_path.name, e)
         return page_num, ""
 
 def extract_pdf(pdf_path: Path, skip_ocr: bool = False) -> str:
@@ -106,7 +106,7 @@ def extract_pdf(pdf_path: Path, skip_ocr: bool = False) -> str:
     page_results = {}
     with tempfile.TemporaryDirectory() as tmp:
         temp_dir_path = Path(tmp)
-        print(f"[INFO] Extracting {num_pages} pages from {pdf_path.name} concurrently...")
+        logger.info("Extracting %s pages from %s concurrently...", num_pages, pdf_path.name)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = {
                 executor.submit(extract_page_worker, pdf_path, page_num, temp_dir_path, skip_ocr): page_num
@@ -118,7 +118,7 @@ def extract_pdf(pdf_path: Path, skip_ocr: bool = False) -> str:
                     _, page_text = future.result()
                     page_results[p_num] = page_text
                 except Exception as e:
-                    print(f"[ERROR] Page worker thread exception on page {p_num}: {e}")
+                    logger.error("Page worker thread exception on page %s: %s", p_num, e)
                     page_results[p_num] = ""
 
     for page_num in range(1, num_pages + 1):
@@ -135,12 +135,12 @@ def main(skip_ocr: bool = False) -> bool:
     cache_dir = output_dir / "cache"
 
     if not input_dir.exists():
-        print(f"[ERROR] Directory not found: {input_dir}")
+        logger.error("Directory not found: %s", input_dir)
         return False
 
     pdfs = sorted(input_dir.glob("*.pdf"))
     if not pdfs:
-        print(f"[WARNING] No PDF files found in {input_dir}")
+        logger.warning("No PDF files found in %s", input_dir)
         return False
 
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -160,10 +160,10 @@ def main(skip_ocr: bool = False) -> bool:
                 is_cache_valid = True
                 
         if is_cache_valid:
-            print(f"[INFO] Using cached text for: {pdf_path.name}")
+            logger.info("Using cached text for: %s", pdf_path.name)
             pdf_text = cache_file.read_text(encoding="utf-8")
         else:
-            print(f"\n[INFO] Extracting text (OCR={not skip_ocr}): {pdf_path.name}")
+            logger.info("Extracting text (OCR=%s): %s", not skip_ocr, pdf_path.name)
             pdf_text = extract_pdf(pdf_path, skip_ocr=skip_ocr)
             cache_file.write_text(pdf_text, encoding="utf-8")
             any_cache_updated = True
@@ -183,10 +183,10 @@ def main(skip_ocr: bool = False) -> bool:
     if rebuild_output:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_file.write_text("".join(combined), encoding="utf-8")
-        print(f"\n[SUCCESS] Combined text saved to {output_file}")
+        logger.info("Combined text saved to %s", output_file)
         return True
     else:
-        print(f"[INFO] {OUTPUT_FILE} and all caches are up to date. Skipping extraction.")
+        logger.info("%s and all caches are up to date. Skipping extraction.", OUTPUT_FILE)
         return False
 
 if __name__ == "__main__":
