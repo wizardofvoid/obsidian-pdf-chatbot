@@ -1,8 +1,11 @@
 import os
+import logging
 from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # pyrefly: ignore [missing-import]
 from langchain_community.vectorstores import FAISS
@@ -103,7 +106,7 @@ class RAGAgent:
             if os.getenv(f"GROQ_API_KEY_{next_idx}"):
                 self._current_key_idx = next_idx
                 self._chain = None  # Force re-loading the chain with the new key!
-                print(f"[RAGAgent Key Rotation] Rotated key index: {old_idx} -> {self._current_key_idx}")
+                logger.info(f"[RAGAgent Key Rotation] Rotated key index: {old_idx} -> {self._current_key_idx}")
                 return True
         return False
 
@@ -196,15 +199,15 @@ class RAGAgent:
                 
                 chain = prompt | llm | StrOutputParser()
                 standalone = chain.invoke({"history": formatted_messages, "input": question})
-                print(f"[RAGAgent] Reformulated conversational query: '{question}' -> '{standalone.strip()}'")
+                logger.info("Reformulated conversational query: '%s' -> '%s'", question, standalone.strip())
                 return standalone.strip()
             except Exception as e:
                 err_str = str(e)
                 if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
-                    print(f"[RAGAgent Rate Limit] Standalone query hit rate limit on attempt {attempt + 1}. Rotating key and retrying...")
+                    logger.warning("Standalone query hit rate limit on attempt %s. Rotating key and retrying...", attempt + 1)
                     if self.rotate_groq_key():
                         continue
-                print(f"[RAGAgent Error] Failed to reformulate conversational query: {e}")
+                logger.error("Failed to reformulate conversational query: %s", e)
                 return question
 
     def _is_meta_query(self, question: str) -> bool:
@@ -280,7 +283,7 @@ class RAGAgent:
                                 if "- [ ]" in note_content or "- [x]" in note_content:
                                     checkbox_notes.append(f"--- START NOTE: {note_file.name} ---\n{note_content}\n--- END NOTE: {note_file.name} ---")
                             except Exception as e:
-                                print(f"[Error reading note {note_file.name} for checkboxes]: {e}")
+                                logger.error("Error reading note '%s' for checkboxes: %s", note_file.name, e)
                         if checkbox_notes:
                             meta_context.append("### Obsidian Notes containing Checkboxes / Tasks:")
                             meta_context.extend(checkbox_notes)
@@ -324,7 +327,7 @@ class RAGAgent:
                     docs_and_scores = vectorstore.similarity_search_with_score(standalone_query, k=RETRIEVAL_K)
                     filtered_docs = []
                     for doc, score in docs_and_scores:
-                        print(f"[RAGAgent PDF Search] Chunk source: {doc.metadata.get('source')} pg {doc.metadata.get('page')}, Score (L2 Distance): {score:.4f}")
+                        logger.info("Chunk source: %s pg %s, Score (L2 Distance): %.4f", doc.metadata.get('source'), doc.metadata.get('page'), score)
                         if score <= 0.85:
                             filtered_docs.append(doc)
                     chunks = [doc.page_content for doc in filtered_docs]
@@ -363,7 +366,7 @@ class RAGAgent:
                 except Exception as e:
                     err_str = str(e)
                     if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
-                        print(f"[RAGAgent Rate Limit] Hit rate limit on attempt {attempt + 1}. Rotating key and retrying...")
+                        logger.warning("Hit rate limit on attempt %s. Rotating key and retrying...", attempt + 1)
                         if self.rotate_groq_key():
                             continue
                     raise e
@@ -400,7 +403,7 @@ class RAGAgent:
                                     if citations is not None:
                                         citations.append({"source": f"Obsidian: {note_file.name}", "page": "Task Note"})
                             except Exception as e:
-                                print(f"[Error reading note {note_file.name} for checkboxes]: {e}")
+                                logger.error("Error reading note '%s' for checkboxes: %s", note_file.name, e)
                         if checkbox_notes:
                             meta_context.append("### Obsidian Notes containing Checkboxes / Tasks:")
                             meta_context.extend(checkbox_notes)
@@ -447,7 +450,7 @@ class RAGAgent:
                     docs_and_scores = vectorstore.similarity_search_with_score(standalone_query, k=RETRIEVAL_K)
                     filtered_docs = []
                     for doc, score in docs_and_scores:
-                        print(f"[RAGAgent PDF Search Stream] Chunk source: {doc.metadata.get('source')} pg {doc.metadata.get('page')}, Score (L2 Distance): {score:.4f}")
+                        logger.info("Chunk source: %s pg %s, Score (L2 Distance): %.4f", doc.metadata.get('source'), doc.metadata.get('page'), score)
                         if score <= 0.85:
                             filtered_docs.append(doc)
                             if citations is not None:
@@ -502,7 +505,7 @@ class RAGAgent:
                 except Exception as e:
                     err_str = str(e)
                     if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
-                        print(f"[RAGAgent Rate Limit] Stream hit rate limit on attempt {attempt + 1}. Rotating key and retrying...")
+                        logger.warning("Stream hit rate limit on attempt %s. Rotating key and retrying...", attempt + 1)
                         if self.rotate_groq_key():
                             continue
                     yield f"[ERROR] {err_str}"
@@ -562,7 +565,7 @@ class RAGAgent:
                 except Exception as e:
                     err_str = str(e)
                     if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
-                        print(f"[RAGAgent Rate Limit] Note compilation hit rate limit. Rotating key and retrying...")
+                        logger.warning("Note compilation hit rate limit. Rotating key and retrying...")
                         if self.rotate_groq_key():
                             continue
                     return {"success": False, "error": f"Failed to distill note: {err_str}"}
@@ -590,7 +593,7 @@ class RAGAgent:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(note_content)
                 
-            print(f"[RAGAgent] Successfully wrote new note: {file_path}")
+            logger.info("Successfully wrote new note: %s", file_path)
             
             # Trigger background graph re-linking
             trigger_success = trigger_obsidian_linker()
@@ -623,64 +626,9 @@ class RAGAgent:
             return {"success": False, "error": str(e)}
 
     def transcribe_audio(self, audio_bytes: bytes, format: str = "webm", translate: bool = False) -> str:
-        """
-        Sends audio bytes containing Indian languages to Groq's Whisper API.
-        If translate is True, uses the translations endpoint to get English text.
-        Otherwise, uses transcriptions endpoint to get text in the native script.
-        """
-        import requests
-        
-        try:
-            api_key = self._get_groq_key()
-            if not api_key:
-                print("[RAGAgent STT] Error: GROQ_API_KEY not found in environment.")
-                return ""
-            
-            if format.startswith("."):
-                format = format[1:]
-            
-            filename = f"audio.{format}"
-            mime_type = f"audio/{format}"
-            
-            endpoint = "translations" if translate else "transcriptions"
-            url = f"https://api.groq.com/openai/v1/audio/{endpoint}"
-            
-            headers = {
-                "Authorization": f"Bearer {api_key}"
-            }
-            
-            files = {
-                "file": (filename, audio_bytes, mime_type)
-            }
-            
-            # Whisper prompt to guide transcription/translation of Indian languages
-            prompt_instruction = (
-                "The audio contains ONLY Indian language speech (like Hindi, Gujarati, Tamil, Telugu, Bengali, Kannada, Marathi, Hinglish, etc.) or English. "
-                "Do NOT transcribe as other global languages (e.g. Chinese, Spanish, Welsh, etc.). "
-                "Please transcribe the speech accurately in the spoken language's original script or English."
-                if not translate else
-                "The audio contains ONLY Indian language speech (like Hindi, Gujarati, Tamil, Telugu, Bengali, Kannada, Marathi, Hinglish, etc.) or English. "
-                "Please translate this speech accurately into standard English text."
-            )
-            
-            data = {
-                "model": "whisper-large-v3",
-                "prompt": prompt_instruction,
-                "response_format": "json"
-            }
-            
-            print(f"[RAGAgent STT] Sending {len(audio_bytes)} bytes to Groq Whisper {endpoint} API...")
-            response = requests.post(url, headers=headers, files=files, data=data, timeout=30)
-            response.raise_for_status()
-            
-            result = response.json()
-            transcription = result.get("text", "").strip()
-            print(f"[RAGAgent STT] Result: '{transcription}'")
-            return transcription
-            
-        except Exception as e:
-            print(f"[RAGAgent STT Error]: Failed to transcribe/translate audio: {e}")
-            return ""
+        import audio_service
+        api_key = self._get_groq_key()
+        return audio_service.transcribe_audio(audio_bytes, api_key, format, translate)
 
     def get_index_status(self) -> dict:
         """
@@ -704,7 +652,7 @@ class RAGAgent:
                         if doc.metadata.get("source")
                     }
             except Exception as e:
-                print(f"[RAGAgent status error] {e}")
+                logger.error("Status check error: %s", e)
         
         # Check modification times
         to_add = list(active_files - indexed_files)
@@ -726,4 +674,10 @@ class RAGAgent:
             "to_delete": sorted(list(set(to_delete)))
         }
 
+    def clean_text_for_tts(self, text: str) -> str:
+        import audio_service
+        return audio_service.clean_text_for_tts(text)
 
+    def text_to_speech(self, text: str, rate: str = "-10%") -> bytes:
+        import audio_service
+        return audio_service.text_to_speech(text, rate)
