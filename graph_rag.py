@@ -1,12 +1,15 @@
 import os
 import re
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Set
 from pydantic import BaseModel, Field
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from config import OBSIDIAN_CACHE_FILE, OBSIDIAN_VAULT_DIR
+
+logger = logging.getLogger(__name__)
 
 class MatchedNotes(BaseModel):
     notes: List[str] = Field(
@@ -25,7 +28,7 @@ class VectorlessGraphRAG:
     def _load_cache(self) -> None:
         """Load the Obsidian Linker cache file if it has been updated."""
         if not self.cache_file.exists():
-            print(f"[Warning] Obsidian linker cache file not found at: {self.cache_file}")
+            logger.warning("Obsidian linker cache file not found at: %s", self.cache_file)
             return
         
         try:
@@ -43,15 +46,15 @@ class VectorlessGraphRAG:
             if "files" in data:
                 self.available_notes = list(data["files"].keys())
                 
-            print(f"[GraphRAG] Loaded cache successfully. Found {len(self.available_notes)} notes in index (mtime: {mtime}).")
+            logger.info("Loaded cache successfully. Found %s notes in index (mtime: %s).", len(self.available_notes), mtime)
         except Exception as e:
-            print(f"[Error] Failed to load Obsidian linker cache: {e}")
+            logger.error("Failed to load Obsidian linker cache: %s", e)
 
     def _load_faiss_index(self):
         """Lazily load the Obsidian concept FAISS vector index."""
         faiss_path = self.vault_dir / ".linker_faiss_index"
         if not faiss_path.exists():
-            print(f"[GraphRAG Warning] Obsidian concept FAISS index not found at: {faiss_path}")
+            logger.warning("Obsidian concept FAISS index not found at: %s", faiss_path)
             return None
         try:
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -62,7 +65,7 @@ class VectorlessGraphRAG:
             if not google_key:
                 google_key = os.getenv("GOOGLE_API_KEY_1")
             if not google_key:
-                print("[GraphRAG Error] GOOGLE_API_KEY not found in environment.")
+                logger.error("GOOGLE_API_KEY not found in environment.")
                 return None
                 
             embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=google_key)
@@ -73,7 +76,7 @@ class VectorlessGraphRAG:
             )
             return vectorstore
         except Exception as e:
-            print(f"[GraphRAG Error] Failed to load Obsidian concept FAISS index: {e}")
+            logger.error("Failed to load Obsidian concept FAISS index: %s", e)
             return None
 
     def select_relevant_notes(self, question: str, limit: int = 3) -> List[str]:
@@ -88,18 +91,18 @@ class VectorlessGraphRAG:
             candidate_notes = []
             
             if vectorstore:
-                print(f"[GraphRAG] Running similarity search on Obsidian FAISS index for: '{question}'")
+                logger.info("Running similarity search on Obsidian FAISS index for: '%s'", question)
                 # Search for top 12 relevant concepts with scores
                 results_with_scores = vectorstore.similarity_search_with_score(question, k=12)
                 seen_candidates = set()
                 for doc, score in results_with_scores:
-                    print(f"[GraphRAG FAISS Search] Note concept: {doc.metadata.get('note')}, Score (L2 Distance): {score:.4f}")
+                    logger.info("Note concept: %s, Score (L2 Distance): %.4f", doc.metadata.get('note'), score)
                     if score <= 0.85:
                         note = doc.metadata.get("note")
                         if note and note in self.available_notes and note not in seen_candidates:
                             seen_candidates.add(note)
                             candidate_notes.append(note)
-                print(f"[GraphRAG] Vector pre-filtering found {len(candidate_notes)} candidate notes: {candidate_notes}")
+                logger.info("Vector pre-filtering found %s candidate notes: %s", len(candidate_notes), candidate_notes)
             
             # 2. Fallback to keyword matching if FAISS is missing/empty, or use a small default subset
             if not candidate_notes:
@@ -114,7 +117,7 @@ class VectorlessGraphRAG:
                 # If still empty, use top 10 notes as broad fallback
                 if not candidate_notes:
                     candidate_notes = sorted(self.available_notes)[:10]
-                print(f"[GraphRAG Fallback] Selected {len(candidate_notes)} fallback candidates: {candidate_notes}")
+                logger.info("Selected %s fallback candidates: %s", len(candidate_notes), candidate_notes)
 
             # 3. Call the LLM to verify and select from the small candidate list (O(1) prompt size!)
             api_key = os.getenv("GROQ_API_KEY")
@@ -125,7 +128,7 @@ class VectorlessGraphRAG:
                         api_key = os.getenv(key_env)
                         break
             if not api_key:
-                print("[GraphRAG Error] GROQ_API_KEY not found in environment.")
+                logger.error("GROQ_API_KEY not found in environment.")
                 return []
 
             # We use a fast, cost-effective 8B model for selection
@@ -160,10 +163,10 @@ CRITICAL RULES:
             
             # Ensure we only keep valid notes that actually exist and strictly respect the limit
             matched = [note for note in result.notes if note in candidate_notes][:limit]
-            print(f"[GraphRAG] Selected relevant notes: {matched}")
+            logger.info("Selected relevant notes: %s", matched)
             return matched
         except Exception as e:
-            print(f"[GraphRAG Error] Failed to select relevant notes via LLM: {e}")
+            logger.error("Failed to select relevant notes via LLM: %s", e)
             return []
 
     def get_note_explanations(self) -> Dict[str, str]:
@@ -229,7 +232,7 @@ CRITICAL RULES:
                 citations.append({"source": f"Obsidian: {note_name}", "page": "Note Content"})
 
             except Exception as e:
-                print(f"[GraphRAG Error] Failed to read note {note_name}: {e}")
+                logger.error("Failed to read note %s: %s", note_name, e)
 
         # 3. Find incoming links (backlinks) from the cache
         # If any note in the vault links to our matched notes, it's an incoming link
