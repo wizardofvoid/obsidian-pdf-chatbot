@@ -18,7 +18,7 @@
 
 Plans:
 - [x] 01-01-PLAN.md — Config Foundation: init(), OBSIDIAN_LINKER_PATH, linker_trigger fix+logging, main.py startup+logging
-- [ ] 01-02-PLAN.md — Print→Logger Migration: Core Modules (rag_agent, extract_text)
+- [x] 01-02-PLAN.md — Print→Logger Migration: Core Modules (rag_agent, extract_text)
 - [ ] 01-03-PLAN.md — Print→Logger Migration: Remaining Modules (text_chunker, graph_rag)
 
 ### Phase 2: Refactor RAGAgent — Shared Retrieval
