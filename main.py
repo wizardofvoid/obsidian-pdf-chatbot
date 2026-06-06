@@ -1,6 +1,10 @@
+import logging
 import streamlit as st
+import config
 from rag_agent import RAGAgent
 from streamlit_mic_recorder import mic_recorder
+
+logger = logging.getLogger(__name__)
 
 @st.cache_resource
 def get_agent() -> RAGAgent:
@@ -15,193 +19,15 @@ def format_citation(c):
         return f"`{source}` (pg. {page})"
 
 def inject_premium_styles():
-    """Injects high-quality minimal dark custom CSS styling and Plus Jakarta Sans overrides directly into the Streamlit page."""
-    st.markdown(
-        """
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&display=swap');
-            
-            /* Typography base */
-            html, body, .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, button, input, select, textarea {
-                font-family: 'Outfit', -apple-system, sans-serif !important;
-                -webkit-font-smoothing: antialiased;
-            }
-            
-            /* Main backgrounds */
-            .stApp {
-                background-color: #09090b !important;
-                background-image: radial-gradient(circle at 50% 0%, rgba(30, 30, 40, 0.5), rgba(9, 9, 11, 1) 60%) !important;
-            }
-            .block-container {
-                background-color: transparent !important;
-            }
-            
-            /* Floating Glassmorphic Sidebar (Contextual Panel) */
-            section[data-testid="stSidebar"] {
-                background-color: rgba(9, 9, 11, 0.65) !important;
-                backdrop-filter: blur(20px) !important;
-                -webkit-backdrop-filter: blur(20px) !important;
-                border-right: none !important;
-                border: 1px solid rgba(255, 255, 255, 0.08) !important;
-                border-radius: 24px !important;
-                height: 94vh !important;
-                top: 3vh !important;
-                left: 1vw !important;
-                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6) !important;
-                transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
-            }
-            
-            /* Hide sidebar collapse button background for cleaner look */
-            button[kind="header"] {
-                background-color: transparent !important;
-            }
-            
-            /* Narrow, centered layout */
-            .block-container {
-                max-width: 850px !important;
-                padding-top: 2rem !important;
-                padding-bottom: 8rem !important;
-            }
-            
-            /* Elegant headings */
-            h1, h2, h3, h4 {
-                color: #fafafa !important;
-                font-weight: 500 !important;
-                letter-spacing: -0.02em !important;
-            }
-            h1 {
-                font-size: 2.25rem !important;
-                margin-bottom: 2rem !important;
-            }
-            
-            /* Text colors */
-            p, span, label, .stMarkdown {
-                color: #a1a1aa !important;
-            }
-            
-            /* Buttons */
-            div.stButton > button, [data-testid="stFormSubmitButton"] > button {
-                background-color: #18181b !important;
-                color: #fafafa !important;
-                border: 1px solid #27272a !important;
-                border-radius: 6px !important;
-                padding: 0.5rem 1rem !important;
-                font-weight: 500 !important;
-                transition: all 0.2s ease !important;
-            }
-            
-            div.stButton > button:hover, [data-testid="stFormSubmitButton"] > button:hover {
-                background-color: #27272a !important;
-                border-color: #3f3f46 !important;
-                color: #ffffff !important;
-            }
-            
-            /* File Uploader Fix & Styling */
-            [data-testid="stFileUploader"] {
-                background-color: transparent !important;
-            }
-            [data-testid="stFileUploaderDropzone"] {
-                background-color: #09090b !important;
-                border: 1px dashed #3f3f46 !important;
-                border-radius: 8px !important;
-                padding: 2rem !important;
-                transition: all 0.2s ease !important;
-            }
-            [data-testid="stFileUploaderDropzone"]:hover {
-                border-color: #52525b !important;
-                background-color: #18181b !important;
-            }
-            /* Specifically style the Browse Files button inside uploader */
-            [data-testid="stFileUploaderDropzone"] button {
-                background-color: #18181b !important;
-                color: #fafafa !important;
-                border: 1px solid #27272a !important;
-                border-radius: 6px !important;
-                font-weight: 500 !important;
-            }
-            [data-testid="stFileUploaderDropzone"] button:hover {
-                background-color: #27272a !important;
-                border-color: #3f3f46 !important;
-            }
-            
-            /* Inputs and Selects */
-            div[data-baseweb="select"] > div {
-                background-color: #09090b !important;
-                border: 1px solid #27272a !important;
-                border-radius: 6px !important;
-            }
-            div[data-baseweb="select"] > div:hover {
-                border-color: #3f3f46 !important;
-            }
-            input[type="text"] {
-                background-color: #09090b !important;
-                border: 1px solid #27272a !important;
-                color: #fafafa !important;
-                border-radius: 6px !important;
-            }
-            input[type="text"]:focus {
-                border-color: #52525b !important;
-            }
-            
-            /* Chat Interface - Lighter Premium Bubbles */
-            [data-testid="stChatMessage"] {
-                border-radius: 12px !important;
-                padding: 1.5rem !important;
-                margin-bottom: 1.5rem !important;
-                border: 1px solid transparent !important;
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1) !important;
-                background-color: #1f1f23 !important;
-                border-color: #27272a !important;
-            }
-            
-            /* User Message Differentiation */
-            [data-testid="stChatMessage"]:has(div[role="img"]:contains("👤")),
-            [data-testid="stChatMessage"]:has(span:contains("user")),
-            [data-testid="stChatMessage"]:nth-child(odd) {
-                background-color: #27272a !important;
-                border-color: #3f3f46 !important;
-            }
-            
-            /* Style Avatars */
-            [data-testid="chatAvatarIcon-user"], [data-testid="chatAvatarIcon-assistant"], [data-testid="stChatMessageAvatar"] {
-                background-color: transparent !important;
-                border-radius: 8px !important;
-            }
-            
-            /* Sleek Floating Chat Input */
-            [data-testid="stChatInput"] {
-                background-color: rgba(9, 9, 11, 0.7) !important;
-                backdrop-filter: blur(20px) !important;
-                -webkit-backdrop-filter: blur(20px) !important;
-                border: 1px solid rgba(255, 255, 255, 0.1) !important;
-                border-radius: 50px !important;
-                box-shadow: 0 15px 35px -5px rgba(0, 0, 0, 0.8) !important;
-                padding: 0.25rem 1rem !important;
-                margin-bottom: 2vh !important;
-                width: calc(100% - 2rem) !important;
-                margin-left: auto !important;
-                margin-right: auto !important;
-            }
-            
-            [data-testid="stChatInput"]:focus-within {
-                border-color: rgba(255, 255, 255, 0.3) !important;
-                box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3), 0 15px 35px -5px rgba(0, 0, 0, 0.8) !important;
-            }
-            
-            /* Alerts */
-            .stAlert {
-                background-color: transparent !important;
-                border: 1px solid #27272a !important;
-                color: #a1a1aa !important;
-                border-radius: 6px !important;
-            }
-            
-            /* Hide Streamlit elements */
-            #MainMenu, footer { visibility: hidden !important; }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+    """Injects high-quality minimal dark custom CSS styling from assets/style.css."""
+    from pathlib import Path
+    style_path = Path(__file__).resolve().parent / "assets" / "style.css"
+    if style_path.exists():
+        with open(style_path, "r", encoding="utf-8") as f:
+            css = f.read()
+        st.markdown(f"<style>\n{css}\n</style>", unsafe_allow_html=True)
+    else:
+        st.warning("Could not find assets/style.css")
 
 def render_message_with_source(content: str):
     import re
@@ -239,12 +65,21 @@ def render_message_with_source(content: str):
         )
 
 def main():
+    config.init()
     st.set_page_config(page_title="Obsidian & PDF Brain Chat", layout="wide")
     inject_premium_styles()
     
     st.title("Obsidian & PDF Study Brain")
     
     agent = get_agent()
+    
+    # Self-healing cache reload if class signature changed
+    try:
+        agent.get_index_status
+        agent.clean_text_for_tts
+    except AttributeError:
+        st.cache_resource.clear()
+        st.rerun()
     audio = None
     voice_mode = "Translate to English"
     
@@ -290,6 +125,8 @@ def main():
             options=["Translate to English", "Original Language (Transcription)"],
             index=0
         )
+        st.checkbox("Read-Aloud Assistant Responses", value=False, key="tts_read_aloud")
+        st.slider("Voice Speed Adjust", min_value=-50, max_value=50, value=-10, step=5, format="%d%%", key="tts_speed")
         audio = mic_recorder(
             start_prompt=" Start Speaking",
             stop_prompt=" Stop & Submit",
@@ -439,6 +276,12 @@ def main():
         with st.chat_message(msg["role"], avatar=avatar):
             if msg["role"] == "assistant":
                 render_message_with_source(msg["content"])
+                if msg.get("audio_bytes"):
+                    is_latest = (i == len(st.session_state["messages"]) - 1)
+                    should_autoplay = is_latest and not msg.get("autoplay_done", False)
+                    if should_autoplay:
+                        msg["autoplay_done"] = True
+                    st.audio(msg["audio_bytes"], format="audio/mp3", autoplay=should_autoplay)
             else:
                 st.markdown(msg["content"])
             if msg["role"] == "assistant" and msg.get("citations"):
@@ -529,10 +372,29 @@ def main():
         else:
             unique_citations = None
             
+    audio_bytes = None
+    logger.debug("tts_read_aloud active: %s", st.session_state.get('tts_read_aloud', False))
+    if st.session_state.get("tts_read_aloud", False):
+        with st.spinner("Synthesizing voice response..."):
+            try:
+                cleaned = agent.clean_text_for_tts(answer)
+                logger.debug("Cleaned text for TTS: '%s'", cleaned)
+                if cleaned:
+                    speed_val = st.session_state.get("tts_speed", -10)
+                    rate_str = f"{speed_val:+d}%"
+                    logger.debug("Calling text_to_speech with rate: '%s'", rate_str)
+                    audio_bytes = agent.text_to_speech(cleaned, rate=rate_str)
+                    logger.debug("Successfully generated %s bytes of audio", len(audio_bytes) if audio_bytes else 0)
+                else:
+                    logger.debug("Cleaned text is empty. Skipping TTS.")
+            except Exception as e:
+                logger.error("TTS failed: %s", e)
+
     st.session_state["messages"].append({
         "role": "assistant",
         "content": answer,
-        "citations": unique_citations
+        "citations": unique_citations,
+        "audio_bytes": audio_bytes
     })
     st.rerun()
 
