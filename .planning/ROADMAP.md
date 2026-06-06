@@ -17,7 +17,7 @@
 4. Application starts and runs correctly with the changes
 
 Plans:
-- [ ] 01-01-PLAN.md — Config Foundation: init(), OBSIDIAN_LINKER_PATH, linker_trigger fix+logging, main.py startup+logging
+- [x] 01-01-PLAN.md — Config Foundation: init(), OBSIDIAN_LINKER_PATH, linker_trigger fix+logging, main.py startup+logging
 - [ ] 01-02-PLAN.md — Print→Logger Migration: Core Modules (rag_agent, extract_text)
 - [ ] 01-03-PLAN.md — Print→Logger Migration: Remaining Modules (text_chunker, graph_rag)
 
@@ -83,7 +83,7 @@ Plans:
 
 | Phase | Name | Req Count | Plans | Status |
 |-------|------|-----------|-------|--------|
-| 1 | Config, Logging & Portable Paths | 4 | 3 | Pending |
+| 1 | Config, Logging & Portable Paths | 4 | 3 | Planned |
 | 2 | Refactor — Shared Retrieval | 1 | — | Pending |
 | 3 | Refactor — Split Monolith | 1 | — | Pending |
 | 4 | Bug Fixes | 4 | — | Pending |
