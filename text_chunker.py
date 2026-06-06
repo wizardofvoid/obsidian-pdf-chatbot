@@ -1,7 +1,10 @@
 import os
 import re
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # pyrefly: ignore [missing-import]
 from langchain_core.documents import Document
@@ -29,11 +32,11 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
     cache_dir = Path(input_dir) / "cache"
 
     if not input_pdf_dir.exists() or not input_pdf_dir.is_dir():
-        print(f"[ERROR] PDF directory not found: {input_pdf_dir.absolute()}")
+        logger.error("PDF directory not found: %s", input_pdf_dir.absolute())
         return []
 
     if not cache_dir.exists() or not cache_dir.is_dir():
-        print(f"[ERROR] Cache directory not found: {cache_dir.absolute()}")
+        logger.error("Cache directory not found: %s", cache_dir.absolute())
         return []
 
     texts = []
@@ -42,7 +45,7 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
     # Find the active PDF cache files
     pdf_paths = sorted(input_pdf_dir.glob("*.pdf"))
     if not pdf_paths:
-        print("[WARNING] No PDF files found to index.")
+        logger.warning("No PDF files found to index.")
         return []
 
     for pdf_path in pdf_paths:
@@ -64,10 +67,10 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
             cache_file = cache_file_false
 
         if not cache_file:
-            print(f"[WARNING] No cached text found for: {pdf_path.name}")
+            logger.warning("No cached text found for: %s", pdf_path.name)
             continue
 
-        print(f"[INFO] Parsing cache file: {cache_file.name}")
+        logger.info("Parsing cache file: %s", cache_file.name)
         try:
             content = cache_file.read_text(encoding="utf-8")
             
@@ -93,13 +96,13 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
                     "page": page_num
                 })
         except Exception as e:
-            print(f"[ERROR] Failed to read or parse cache for {pdf_path.name}: {e}")
+            logger.error("Failed to read or parse cache for %s: %s", pdf_path.name, e)
 
     if not texts:
-        print("[WARNING] No text segments found to chunk.")
+        logger.warning("No text segments found to chunk.")
         return []
 
-    print(f"[INFO] Initializing token-aware text splitter (Size: {chunk_size}, Overlap: {chunk_overlap})...")
+    logger.info("Initializing token-aware text splitter (Size: %s, Overlap: %s)...", chunk_size, chunk_overlap)
     
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         encoding_name="cl100k_base",
@@ -108,7 +111,7 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
         separators=["\n\n", "\n", ". ", " ", ""]
     )
 
-    print("[INFO] Splitting text into metadata-aware documents...")
+    logger.info("Splitting text into metadata-aware documents...")
     docs = splitter.create_documents(texts, metadatas=metadatas)
     return docs
 
@@ -122,7 +125,7 @@ def create_vectorstore(docs: list[Document]):
     chunks = [doc.page_content for doc in docs]
     metadatas = [doc.metadata for doc in docs]
 
-    print(f"[INFO] Initializing Google Embeddings Model ({EMBEDDING_MODEL})...")
+    logger.info("Initializing Google Embeddings Model (%s)...", EMBEDDING_MODEL)
     
     try:
         api_key = os.getenv("GOOGLE_API_KEY")
@@ -130,7 +133,7 @@ def create_vectorstore(docs: list[Document]):
             api_key = os.getenv("GOOGLE_API_KEY_1")
         embeddings_model = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=api_key)
     except Exception as e:
-        print(f"[ERROR] Failed to initialize embeddings model. Make sure GOOGLE_API_KEY is set. Details: {e}")
+        logger.error("Failed to initialize embeddings model. Make sure GOOGLE_API_KEY is set. Details: %s", e)
         return None
 
     try:
@@ -138,7 +141,7 @@ def create_vectorstore(docs: list[Document]):
         import time
         
         embeddings_list = [None] * len(chunks)
-        print(f"[INFO] Generating embeddings for {len(chunks)} chunks concurrently with safe throttling...")
+        logger.info("Generating embeddings for %s chunks concurrently with safe throttling...", len(chunks))
 
         def embed_single_chunk(item):
             idx, chunk = item
@@ -153,12 +156,12 @@ def create_vectorstore(docs: list[Document]):
                     err_msg = str(e).lower()
                     if "rate limit" in err_msg or "429" in err_msg or "resource_exhausted" in err_msg:
                         delay = 4 * (attempt + 1)
-                        print(f"\n[WARNING] Rate limit hit on chunk {idx+1} (Attempt {attempt+1}/5). Backing off for {delay}s...")
+                        logger.warning("Rate limit hit on chunk %s (Attempt %s/5). Backing off for %ss...", idx + 1, attempt + 1, delay)
                         time.sleep(delay)
                         continue
                     time.sleep(1)
             
-            print(f"\n[ERROR] Failed to embed chunk {idx+1} after 5 attempts: {last_error}")
+            logger.error("Failed to embed chunk %s after 5 attempts: %s", idx + 1, last_error)
             raise last_error
 
         # Use max_workers=2 to prevent rapid concurrent request bursts
@@ -168,7 +171,7 @@ def create_vectorstore(docs: list[Document]):
         for idx, emb in results:
             embeddings_list[idx] = emb
             
-        print("[INFO] All embeddings generated successfully.")
+        logger.info("All embeddings generated successfully.")
         
         # Create FAISS vector store from the manually generated embeddings with metadata
         text_embeddings = list(zip(chunks, embeddings_list))
@@ -180,7 +183,7 @@ def create_vectorstore(docs: list[Document]):
         
         return vectorstore
     except Exception as e:
-        print(f"\n[ERROR] FAISS creation failed: {e}")
+        logger.error("FAISS creation failed: %s", e)
         return None
 
 def main() -> bool:
@@ -193,9 +196,9 @@ def main() -> bool:
         import shutil
         if VECTORSTORE_DIR.exists():
             shutil.rmtree(VECTORSTORE_DIR)
-            print("[SUCCESS] All PDFs removed. Cleared FAISS index directory.")
+            logger.info("All PDFs removed. Cleared FAISS index directory.")
         else:
-            print("[INFO] No PDFs found and no index to clear.")
+            logger.info("No PDFs found and no index to clear.")
         return True
 
     # 1. Check if index exists and load it to determine existing sources
@@ -204,7 +207,7 @@ def main() -> bool:
     index_exists = (VECTORSTORE_DIR / "index.faiss").exists()
 
     if index_exists:
-        print("[INFO] Existing FAISS index detected. Checking currently indexed PDFs...")
+        logger.info("Existing FAISS index detected. Checking currently indexed PDFs...")
         try:
             api_key = os.getenv("GOOGLE_API_KEY")
             if not api_key:
@@ -221,9 +224,9 @@ def main() -> bool:
                     for doc in vectorstore.docstore._dict.values()
                     if doc.metadata.get("source")
                 }
-            print(f"[INFO] Loaded existing FAISS index. Indexed PDFs: {existing_sources}")
+            logger.info("Loaded existing FAISS index. Indexed PDFs: %s", existing_sources)
         except Exception as e:
-            print(f"[WARNING] Failed to load existing FAISS index: {e}. Will rebuild index from scratch.")
+            logger.warning("Failed to load existing FAISS index: %s. Will rebuild index from scratch.", e)
             vectorstore = None
 
     # 2. Determine modification time of index
@@ -240,15 +243,11 @@ def main() -> bool:
     sources_to_delete = (existing_sources - active_pdfs) | modified_pdfs
     sources_to_index = (active_pdfs - existing_sources) | modified_pdfs
 
-    print(f"[INFO] Sync Plan:")
-    print(f"       - Active PDFs: {active_pdfs}")
-    print(f"       - Already Indexed: {existing_sources}")
-    print(f"       - To Delete/Re-index: {sources_to_delete}")
-    print(f"       - To Generate/Add: {sources_to_index}")
+    logger.info("Sync Plan:\n       - Active PDFs: %s\n       - Already Indexed: %s\n       - To Delete/Re-index: %s\n       - To Generate/Add: %s", active_pdfs, existing_sources, sources_to_delete, sources_to_index)
 
     # No changes required!
     if not sources_to_delete and not sources_to_index:
-        print("[INFO] FAISS vector store is already perfectly up to date. Skipping re-indexing.")
+        logger.info("FAISS vector store is already perfectly up to date. Skipping re-indexing.")
         return True
 
     # 5. Delete removed/modified PDF chunks from the loaded index
@@ -260,29 +259,29 @@ def main() -> bool:
             ]
             if ids_to_delete:
                 vectorstore.delete(ids_to_delete)
-                print(f"[SUCCESS] Deleted {len(ids_to_delete)} old chunks from the index.")
+                logger.info("Deleted %s old chunks from the index.", len(ids_to_delete))
             # If after deletion the index becomes empty, set vectorstore to None so a new clean FAISS is initialized
             if not vectorstore.docstore._dict:
-                print("[INFO] Index is now empty after deletions.")
+                logger.info("Index is now empty after deletions.")
                 vectorstore = None
         except Exception as e:
-            print(f"[WARNING] Failed to delete chunks from existing index: {e}. Will rebuild index from scratch.")
+            logger.warning("Failed to delete chunks from existing index: %s. Will rebuild index from scratch.", e)
             vectorstore = None
 
     # 6. Index new or modified documents
     if sources_to_index:
-        print(f"[INFO] Chunking new/modified documents: {sources_to_index}...")
+        logger.info("Chunking new/modified documents: %s...", sources_to_index)
         chunks = chunk_all_text_files(str(OUTPUT_DIR), CHUNK_SIZE, CHUNK_OVERLAP, target_sources=sources_to_index)
         
         if not chunks:
-            print("[WARNING] No text chunks generated for the new/modified documents.")
+            logger.warning("No text chunks generated for the new/modified documents.")
         else:
-            print(f"[SUCCESS] Generated {len(chunks)} chunks to index.")
-            print("[INFO] Building embeddings for new chunks...")
+            logger.info("Generated %s chunks to index.", len(chunks))
+            logger.info("Building embeddings for new chunks...")
             
             temp_vectorstore = create_vectorstore(chunks)
             if not temp_vectorstore:
-                print("[ERROR] Failed to generate embeddings for new chunks.")
+                logger.error("Failed to generate embeddings for new chunks.")
                 return False
                 
             if vectorstore is None:
@@ -290,25 +289,25 @@ def main() -> bool:
                 vectorstore = temp_vectorstore
             else:
                 # Merge the new FAISS index into our existing one
-                print("[INFO] Merging new chunks into the existing FAISS index...")
+                logger.info("Merging new chunks into the existing FAISS index...")
                 vectorstore.merge_from(temp_vectorstore)
-                print("[SUCCESS] Merged new chunks successfully.")
+                logger.info("Merged new chunks successfully.")
 
     # 7. Save the updated main index back to disk
     if vectorstore:
         try:
             vectorstore.save_local(str(VECTORSTORE_DIR))
-            print(f"[SUCCESS] FAISS vector store successfully saved to '{VECTORSTORE_DIR}'!")
+            logger.info("FAISS vector store successfully saved to '%s'!", VECTORSTORE_DIR)
             return True
         except Exception as e:
-            print(f"[ERROR] Failed to save FAISS index: {e}")
+            logger.error("Failed to save FAISS index: %s", e)
             return False
     else:
         # If vectorstore is None here, it means all PDFs were cleared
         import shutil
         if VECTORSTORE_DIR.exists():
             shutil.rmtree(VECTORSTORE_DIR)
-        print("[SUCCESS] Vector store is now completely empty.")
+        logger.info("Vector store is now completely empty.")
         return True
 
 if __name__ == "__main__":
