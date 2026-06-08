@@ -162,6 +162,43 @@ class RAGAgent:
                     return "\n".join(checkbox_notes)
                 return "No tasks found."
                 
+            @tool
+            def list_obsidian_notes(dummy: str = "") -> str:
+                """List all available markdown notes in the Obsidian vault."""
+                from config import OBSIDIAN_VAULT_DIR
+                vault_path = Path(OBSIDIAN_VAULT_DIR)
+                if not vault_path.exists():
+                    return "Vault directory not found."
+                notes = [f.name for f in vault_path.glob("*.md")]
+                if notes:
+                    return "Available notes: \n" + "\n".join(notes)
+                return "No notes found in the vault."
+                
+            @tool
+            def read_obsidian_note(note_title: str) -> str:
+                """Read the exact, raw markdown content of a specific Obsidian note. Provide the note title (with or without .md)."""
+                from config import OBSIDIAN_VAULT_DIR
+                vault_path = Path(OBSIDIAN_VAULT_DIR)
+                if not note_title.lower().endswith(".md"):
+                    note_title += ".md"
+                
+                note_file = vault_path / note_title
+                if not note_file.exists():
+                    # Try case-insensitive search
+                    for f in vault_path.glob("*.md"):
+                        if f.name.lower() == note_title.lower():
+                            note_file = f
+                            break
+                            
+                if note_file.exists():
+                    try:
+                        content = note_file.read_text(encoding="utf-8")
+                        self._current_citations.append({"source": f"Obsidian: {note_file.name}", "page": "Raw Note"})
+                        return content
+                    except Exception as e:
+                        return f"Error reading note: {e}"
+                return f"Note '{note_title}' not found in the vault."
+                
             from langgraph.prebuilt import create_react_agent
             system_message = (
                 "You are an expert personal study assistant. You have access to tools to search the user's Obsidian notes, PDF materials, and tasks.\n"
@@ -169,7 +206,7 @@ class RAGAgent:
                 "If the user asks a normal question that doesn't need search, just answer normally."
             )
             
-            self._agent_executor = create_react_agent(llm, tools=[search_pdf_materials, search_obsidian_graph, scan_obsidian_tasks], prompt=system_message)
+            self._agent_executor = create_react_agent(llm, tools=[search_pdf_materials, search_obsidian_graph, scan_obsidian_tasks, list_obsidian_notes, read_obsidian_note], prompt=system_message)
             
         return self._agent_executor
 
