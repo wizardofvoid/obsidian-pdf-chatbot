@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-from langchain_community.vectorstores import Pinecone
+from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone as PineconeClient
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.output_parsers import StrOutputParser
@@ -30,7 +30,7 @@ class RAGAgent:
     """Agentic RAG pipeline: retrieves from Neo4j Graph and Pinecone PDFs using autonomous tools."""
 
     def __init__(self):
-        self._vectorstore: Pinecone | None = None
+        self._vectorstore: PineconeVectorStore | None = None
         self._agent_executor = None
         self._session_store: dict[str, InMemoryChatMessageHistory] = {}
         self._graph_rag = None
@@ -77,17 +77,17 @@ class RAGAgent:
             self._session_store[session_id] = InMemoryChatMessageHistory()
         return self._session_store[session_id]
 
-    def _load_vectorstore(self) -> Pinecone:
+    def _load_vectorstore(self) -> PineconeVectorStore:
         if self._vectorstore is None:
             google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY_1")
             embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=google_key)
             pc = PineconeClient(api_key=PINECONE_API_KEY)
             index = pc.Index(PINECONE_INDEX_NAME)
-            self._vectorstore = Pinecone(
-                index=index,
+            self._vectorstore = PineconeVectorStore(
+                index_name=PINECONE_INDEX_NAME,
                 embedding=embeddings,
                 namespace="pdfs",
-                text_key="text"
+                pinecone_api_key=PINECONE_API_KEY
             )
         return self._vectorstore
 

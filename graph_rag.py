@@ -37,7 +37,7 @@ class Neo4jGraphRAG:
         """Lazily load the Obsidian concept Pinecone vector index."""
         try:
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
-            from langchain_community.vectorstores import Pinecone
+            from langchain_pinecone import PineconeVectorStore
             from pinecone import Pinecone as PineconeClient
             from config import EMBEDDING_MODEL, PINECONE_INDEX_NAME
             
@@ -51,11 +51,11 @@ class Neo4jGraphRAG:
             pc = PineconeClient(api_key=PINECONE_API_KEY)
             index = pc.Index(PINECONE_INDEX_NAME)
             
-            vectorstore = Pinecone(
-                index=index,
+            vectorstore = PineconeVectorStore(
+                index_name=PINECONE_INDEX_NAME,
                 embedding=embeddings,
                 namespace="obsidian",
-                text_key="text"
+                pinecone_api_key=PINECONE_API_KEY
             )
             return vectorstore
         except Exception as e:

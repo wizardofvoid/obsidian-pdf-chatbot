@@ -17,3 +17,4 @@ neo4j>=5.14.0
 langchain-neo4j>=0.1.0
 langgraph>=0.0.30
 pinecone>=4.0.0
+langchain-pinecone>=0.1.0

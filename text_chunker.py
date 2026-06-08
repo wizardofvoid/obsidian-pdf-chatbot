@@ -23,7 +23,7 @@ load_dotenv()
 # =========================================================
 from config import OUTPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, INPUT_PDF_DIR, PINECONE_API_KEY, PINECONE_INDEX_NAME
 from pinecone import Pinecone as PineconeClient
-from langchain_community.vectorstores import Pinecone
+from langchain_pinecone import PineconeVectorStore
 
 def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, target_sources: set[str] = None) -> list[Document]:
     """
