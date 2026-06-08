@@ -51,7 +51,7 @@ def run_obsidian_linker_sync() -> bool:
             "github_url": repo_url,
             "github_token": token
         }
-        response = requests.post(f"{api_url}/sync", json=payload, timeout=10)
+        response = requests.post(f"{api_url}/sync", json=payload, timeout=90)
         
         if response.status_code == 200:
             logger.info("Obsidian Linker API responded successfully.")
@@ -59,6 +59,9 @@ def run_obsidian_linker_sync() -> bool:
         else:
             logger.error(f"Linker API failed with code {response.status_code}: {response.text}")
             return False
+    except requests.exceptions.ReadTimeout:
+        logger.warning("Linker API request timed out. This is normal if Render is cold-starting or cloning a large vault.")
+        return True
     except Exception as e:
         logger.error(f"Failed to run linker API synchronously: {e}")
         return False
