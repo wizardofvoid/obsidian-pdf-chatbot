@@ -145,7 +145,7 @@ class RAGAgent:
                 return res["context"]
                 
             @tool
-            def scan_obsidian_tasks() -> str:
+            def scan_obsidian_tasks(dummy: str = "") -> str:
                 """Scan the entire Obsidian vault for pending or completed tasks (checkboxes - [ ] or - [x])."""
                 from config import OBSIDIAN_VAULT_DIR
                 vault_path = Path(OBSIDIAN_VAULT_DIR)
@@ -165,7 +165,7 @@ class RAGAgent:
             from langgraph.prebuilt import create_react_agent
             system_message = (
                 "You are an expert personal study assistant. You have access to tools to search the user's Obsidian notes, PDF materials, and tasks.\n"
-                "Always use these tools to find relevant information before answering. Synthesize the tool outputs to form your final answer.\n"
+                "Use these tools if you need to find relevant information before answering. If the user just says hi, answer normally.\n"
                 "Append '[SOURCE: MATERIALS]' at the end of your response if you found the answer via tools, or '[SOURCE: GENERAL]' if you used general knowledge."
             )
             
