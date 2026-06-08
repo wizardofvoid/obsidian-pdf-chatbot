@@ -165,8 +165,8 @@ class RAGAgent:
             from langgraph.prebuilt import create_react_agent
             system_message = (
                 "You are an expert personal study assistant. You have access to tools to search the user's Obsidian notes, PDF materials, and tasks.\n"
-                "Use these tools if you need to find relevant information before answering. If the user just says hi, answer normally.\n"
-                "Append '[SOURCE: MATERIALS]' at the end of your response if you found the answer via tools, or '[SOURCE: GENERAL]' if you used general knowledge."
+                "If you need to search, you MUST use the tools. DO NOT output any conversational text before or alongside a tool call.\n"
+                "If the user asks a normal question that doesn't need search, just answer normally."
             )
             
             self._agent_executor = create_react_agent(llm, tools=[search_pdf_materials, search_obsidian_graph, scan_obsidian_tasks], prompt=system_message)

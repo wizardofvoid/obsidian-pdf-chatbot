@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # Define local project paths
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
-LINKER_ENV_PATH = BASE_DIR.parent / "obsidian-linker" / ".env"
+LINKER_ENV_PATH = BASE_DIR / "obsidian-linker" / ".env"
 
 # Load environment variables
 load_dotenv(dotenv_path=ENV_PATH)
@@ -27,7 +27,7 @@ OUTPUT_TEXT = OUTPUT_DIR / "output.txt"
 # Fallback to an 'ObsidianVault' folder inside the project if not set in .env
 OBSIDIAN_VAULT_DIR = Path(os.getenv("OBSIDIAN_VAULT_DIR", str(BASE_DIR / "ObsidianVault")))
 OBSIDIAN_CACHE_FILE = OBSIDIAN_VAULT_DIR / ".linker_cache.json"
-OBSIDIAN_LINKER_PATH: Path = Path(os.getenv("OBSIDIAN_LINKER_PATH", str(BASE_DIR.parent / "obsidian-linker" / "main.py")))
+OBSIDIAN_LINKER_PATH: Path = Path(os.getenv("OBSIDIAN_LINKER_PATH", str(BASE_DIR / "obsidian-linker" / "main.py")))
 
 # Pinecone Vector Index storage
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
