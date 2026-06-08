@@ -121,7 +121,7 @@ Remaining files with `print()` calls: `image_text.py`, `audio_service.py` — po
 
 ## Self-Check: PASSED
 
-All 2 files exist. All 2 commits verified.
+All 3 files exist (text_chunker.py, graph_rag.py, 01-03-SUMMARY.md). All 3 commits verified (1a5bc7a, 44b82e6, fc3326d). All 5 verification checks pass: zero print() calls in both files, valid syntax in both files, logger setup present in both files.
 
 ---
 

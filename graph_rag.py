@@ -142,21 +142,8 @@ class VectorlessGraphRAG:
                 summary = note_explanations.get(note, "No concept summary available.")
                 notes_str += f"- **{note}** (Summary: {summary})\n"
             
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", "You are an intelligent knowledge retrieval assistant. Your job is to select the most relevant study notes from a personal knowledge base to answer a user's question. Be extremely strict: do not select any notes unless they are directly relevant."),
-                ("user", """User Question: {question}
- 
-Here is the list of candidate study notes in your knowledge base:
-{notes_list}
- 
-CRITICAL RULES:
-- **Strict Relevance Only**: Only select notes that contain actual, concrete factual content directly relevant to answering the user's question.
-- **Empty List Fallback**: If NONE of the available notes are directly relevant, or if the question is specifically asking about an uploaded PDF, document, or paper that is not in the list above, you MUST return an empty list: [].
-- **No Force-Matching**: Do not select notes just because they share a few broad technical keywords if they do not contain specific information to help answer the user's query.
-- Do not invent note names. Select ONLY from the exact list provided above.
-- Select at most {limit} notes.
-- Return the selection as a structured object containing a 'notes' list.""")
-            ])
+            from prompts import GRAPH_NOTE_SELECTION_PROMPT
+            prompt = GRAPH_NOTE_SELECTION_PROMPT
             
             chain = prompt | structured_llm
             result = chain.invoke({"question": question, "notes_list": notes_str, "limit": limit})

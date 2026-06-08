@@ -1,0 +1,179 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&display=swap');
+
+/* Typography base */
+html, body, .stApp, .stMarkdown, p, h1, h2, h3, h4, h5, h6, button, input, select, textarea {
+    font-family: 'Outfit', -apple-system, sans-serif !important;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Main backgrounds */
+.stApp {
+    background-color: #09090b !important;
+    background-image: radial-gradient(circle at 50% 0%, rgba(30, 30, 40, 0.5), rgba(9, 9, 11, 1) 60%) !important;
+}
+.block-container {
+    background-color: transparent !important;
+}
+
+/* Floating Glassmorphic Sidebar (Contextual Panel) */
+section[data-testid="stSidebar"] {
+    background-color: rgba(9, 9, 11, 0.65) !important;
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+    border-right: none !important;
+    border: 1px solid rgba(255, 255, 255, 0.08) !important;
+    border-radius: 24px !important;
+    height: 94vh !important;
+    top: 3vh !important;
+    left: 1vw !important;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6) !important;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* Hide sidebar collapse button background for cleaner look */
+button[kind="header"] {
+    background-color: transparent !important;
+}
+
+/* Narrow, centered layout */
+.block-container {
+    max-width: 850px !important;
+    padding-top: 2rem !important;
+    padding-bottom: 8rem !important;
+}
+
+/* Elegant headings */
+h1, h2, h3, h4 {
+    color: #fafafa !important;
+    font-weight: 500 !important;
+    letter-spacing: -0.02em !important;
+}
+h1 {
+    font-size: 2.25rem !important;
+    margin-bottom: 2rem !important;
+}
+
+/* Text colors */
+p, span, label, .stMarkdown {
+    color: #a1a1aa !important;
+}
+
+/* Buttons */
+div.stButton > button, [data-testid="stFormSubmitButton"] > button {
+    background-color: #18181b !important;
+    color: #fafafa !important;
+    border: 1px solid #27272a !important;
+    border-radius: 6px !important;
+    padding: 0.5rem 1rem !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
+}
+
+div.stButton > button:hover, [data-testid="stFormSubmitButton"] > button:hover {
+    background-color: #27272a !important;
+    border-color: #3f3f46 !important;
+    color: #ffffff !important;
+}
+
+/* File Uploader Fix & Styling */
+[data-testid="stFileUploader"] {
+    background-color: transparent !important;
+}
+[data-testid="stFileUploaderDropzone"] {
+    background-color: #09090b !important;
+    border: 1px dashed #3f3f46 !important;
+    border-radius: 8px !important;
+    padding: 2rem !important;
+    transition: all 0.2s ease !important;
+}
+[data-testid="stFileUploaderDropzone"]:hover {
+    border-color: #52525b !important;
+    background-color: #18181b !important;
+}
+/* Specifically style the Browse Files button inside uploader */
+[data-testid="stFileUploaderDropzone"] button {
+    background-color: #18181b !important;
+    color: #fafafa !important;
+    border: 1px solid #27272a !important;
+    border-radius: 6px !important;
+    font-weight: 500 !important;
+}
+[data-testid="stFileUploaderDropzone"] button:hover {
+    background-color: #27272a !important;
+    border-color: #3f3f46 !important;
+}
+
+/* Inputs and Selects */
+div[data-baseweb="select"] > div {
+    background-color: #09090b !important;
+    border: 1px solid #27272a !important;
+    border-radius: 6px !important;
+}
+div[data-baseweb="select"] > div:hover {
+    border-color: #3f3f46 !important;
+}
+input[type="text"] {
+    background-color: #09090b !important;
+    border: 1px solid #27272a !important;
+    color: #fafafa !important;
+    border-radius: 6px !important;
+}
+input[type="text"]:focus {
+    border-color: #52525b !important;
+}
+
+/* Chat Interface - Lighter Premium Bubbles */
+[data-testid="stChatMessage"] {
+    border-radius: 12px !important;
+    padding: 1.5rem !important;
+    margin-bottom: 1.5rem !important;
+    border: 1px solid transparent !important;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.1) !important;
+    background-color: #1f1f23 !important;
+    border-color: #27272a !important;
+}
+
+/* User Message Differentiation */
+[data-testid="stChatMessage"]:has(div[role="img"]:contains("👤")),
+[data-testid="stChatMessage"]:has(span:contains("user")),
+[data-testid="stChatMessage"]:nth-child(odd) {
+    background-color: #27272a !important;
+    border-color: #3f3f46 !important;
+}
+
+/* Style Avatars */
+[data-testid="chatAvatarIcon-user"], [data-testid="chatAvatarIcon-assistant"], [data-testid="stChatMessageAvatar"] {
+    background-color: transparent !important;
+    border-radius: 8px !important;
+}
+
+/* Sleek Floating Chat Input */
+[data-testid="stChatInput"] {
+    background-color: rgba(9, 9, 11, 0.7) !important;
+    backdrop-filter: blur(20px) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 50px !important;
+    box-shadow: 0 15px 35px -5px rgba(0, 0, 0, 0.8) !important;
+    padding: 0.25rem 1rem !important;
+    margin-bottom: 2vh !important;
+    width: calc(100% - 2rem) !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+}
+
+[data-testid="stChatInput"]:focus-within {
+    border-color: rgba(255, 255, 255, 0.3) !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3), 0 15px 35px -5px rgba(0, 0, 0, 0.8) !important;
+}
+
+/* Alerts */
+.stAlert {
+    background-color: transparent !important;
+    border: 1px solid #27272a !important;
+    color: #a1a1aa !important;
+    border-radius: 6px !important;
+}
+
+/* Hide Streamlit elements */
+#MainMenu, footer { visibility: hidden !important; }
