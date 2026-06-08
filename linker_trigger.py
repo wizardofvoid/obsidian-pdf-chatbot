@@ -14,8 +14,8 @@ def trigger_obsidian_linker() -> bool:
         logger.error("LINKER_API_URL not set in environment.")
         return False
         
-    repo_url = os.getenv("OBSIDIAN_REPO_URL")
-    token = os.getenv("GITHUB_TOKEN")
+    repo_url = os.getenv("OBSIDIAN_REPO_URL", "")
+    token = os.getenv("GITHUB_TOKEN", "")
     
     try:
         payload = {
@@ -42,8 +42,8 @@ def run_obsidian_linker_sync() -> bool:
         logger.error("LINKER_API_URL not set in environment.")
         return False
         
-    repo_url = os.getenv("OBSIDIAN_REPO_URL")
-    token = os.getenv("GITHUB_TOKEN")
+    repo_url = os.getenv("OBSIDIAN_REPO_URL", "")
+    token = os.getenv("GITHUB_TOKEN", "")
     
     try:
         logger.info("Starting synchronous Obsidian Linker API run...")
