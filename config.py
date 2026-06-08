@@ -35,7 +35,7 @@ PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "obsidian-brain")
 
 
 # Model configurations
-EMBEDDING_MODEL = "models/text-embedding-004"
+EMBEDDING_MODEL = "models/gemini-embedding-2"
 LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
 
 # RAG and Chunking configurations
