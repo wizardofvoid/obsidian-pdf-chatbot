@@ -12,3 +12,7 @@ faiss-cpu>=1.8.0
 google-genai>=0.1.0
 tiktoken>=0.6.0
 streamlit-mic-recorder>=0.1.4
+edge-tts>=7.2.8
+neo4j>=5.14.0
+langchain-neo4j>=0.1.0
+langgraph>=0.0.30

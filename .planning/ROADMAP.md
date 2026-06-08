@@ -22,6 +22,11 @@ Plans:
 - [x] 01-03-PLAN.md — Print→Logger Migration: Remaining Modules (text_chunker, graph_rag)
 
 ### Phase 2: Refactor RAGAgent — Shared Retrieval
+**Status:** Planned
+**Plans:** 1 plan (Wave 1)
+
+Plans:
+- [ ] 02-01-PLAN.md — Extract _retrieve_context(), refactor ask() and ask_stream()
 **Goal:** Eliminate the ~200 lines of duplicated retrieval logic between `ask()` and `ask_stream()` by extracting a shared `_retrieve_context()` method.
 **Requirements:** REFACTOR-01
 **Success Criteria:**
@@ -83,8 +88,8 @@ Plans:
 
 | Phase | Name | Req Count | Plans | Status |
 |-------|------|-----------|-------|--------|
-| 1 | Config, Logging & Portable Paths | 4 | 3 | Planned |
-| 2 | Refactor — Shared Retrieval | 1 | — | Pending |
+| 1 | Config, Logging & Portable Paths | 4 | 3 | **Complete** |
+| 2 | Refactor — Shared Retrieval | 1 | 1 | **Planned** |
 | 3 | Refactor — Split Monolith | 1 | — | Pending |
 | 4 | Bug Fixes | 4 | — | Pending |
 | 5 | Performance Optimization | 2 | — | Pending |

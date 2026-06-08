@@ -21,7 +21,9 @@ load_dotenv()
 # =========================================================
 # CONFIG
 # =========================================================
-from config import OUTPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, VECTORSTORE_DIR, INPUT_PDF_DIR
+from config import OUTPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, INPUT_PDF_DIR, PINECONE_API_KEY, PINECONE_INDEX_NAME
+from pinecone import Pinecone as PineconeClient
+from langchain_community.vectorstores import Pinecone
 
 def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, target_sources: set[str] = None) -> list[Document]:
     """
@@ -173,102 +175,100 @@ def create_vectorstore(docs: list[Document]):
             
         logger.info("All embeddings generated successfully.")
         
-        # Create FAISS vector store from the manually generated embeddings with metadata
+        import uuid
+        ids = [str(uuid.uuid4()) for _ in chunks]
         text_embeddings = list(zip(chunks, embeddings_list))
-        vectorstore = FAISS.from_embeddings(
-            text_embeddings=text_embeddings,
-            embedding=embeddings_model,
-            metadatas=metadatas
-        )
         
-        return vectorstore
+        # Initialize Pinecone Client
+        pc = PineconeClient(api_key=PINECONE_API_KEY)
+        index = pc.Index(PINECONE_INDEX_NAME)
+        
+        # Upsert in batches of 100
+        batch_size = 100
+        for i in range(0, len(text_embeddings), batch_size):
+            batch = text_embeddings[i:i+batch_size]
+            batch_ids = ids[i:i+batch_size]
+            batch_meta = metadatas[i:i+batch_size]
+            
+            vectors = []
+            for j, (text, emb) in enumerate(batch):
+                meta = batch_meta[j]
+                meta["text"] = text  # Langchain Pinecone requires text in metadata
+                vectors.append((batch_ids[j], emb, meta))
+                
+            index.upsert(vectors=vectors, namespace="pdfs")
+            
+        return True
     except Exception as e:
-        logger.error("FAISS creation failed: %s", e)
-        return None
+        logger.error("Pinecone creation failed: %s", e)
+        return False
 
 def main() -> bool:
     input_pdf_dir = Path(INPUT_PDF_DIR)
     pdf_paths = sorted(input_pdf_dir.glob("*.pdf"))
     active_pdfs = {pdf_path.name for pdf_path in pdf_paths}
 
-    # If no PDFs exist at all, clear the index directory
+    pc = PineconeClient(api_key=PINECONE_API_KEY)
+    index = pc.Index(PINECONE_INDEX_NAME)
+
+    # 1. Identify which PDFs are already in the Pinecone namespace
+    # Since Pinecone doesn't easily let us list all distinct metadata values,
+    # we use a local cache file to track what we've indexed from this machine.
+    # In a fully serverless environment, this means we rebuild if the file is lost,
+    # or we just rely on active_pdfs.
+    import json
+    cache_file = input_pdf_dir / ".pinecone_sync_cache.json"
+    
+    existing_sources = {}
+    if cache_file.exists():
+        try:
+            existing_sources = json.loads(cache_file.read_text())
+        except:
+            pass
+
+    # If no PDFs exist at all locally, we should probably clear the namespace 
+    # but ONLY if we are tracking them. For now, we assume local is source of truth.
     if not active_pdfs:
-        import shutil
-        if VECTORSTORE_DIR.exists():
-            shutil.rmtree(VECTORSTORE_DIR)
-            logger.info("All PDFs removed. Cleared FAISS index directory.")
-        else:
-            logger.info("No PDFs found and no index to clear.")
+        try:
+            index.delete(delete_all=True, namespace="pdfs")
+            logger.info("All PDFs removed. Cleared Pinecone 'pdfs' namespace.")
+            if cache_file.exists():
+                cache_file.unlink()
+        except Exception as e:
+            logger.error("Failed to clear Pinecone: %s", e)
         return True
 
-    # 1. Check if index exists and load it to determine existing sources
-    vectorstore = None
-    existing_sources = set()
-    index_exists = (VECTORSTORE_DIR / "index.faiss").exists()
+    # 2. Determine additions, deletions, and updates
+    sources_to_delete = set(existing_sources.keys()) - active_pdfs
+    sources_to_index = active_pdfs - set(existing_sources.keys())
+    
+    # Check for modifications
+    for pdf_name in active_pdfs:
+        if pdf_name in existing_sources:
+            pdf_path = input_pdf_dir / pdf_name
+            if pdf_path.stat().st_mtime > existing_sources[pdf_name]:
+                sources_to_delete.add(pdf_name)
+                sources_to_index.add(pdf_name)
 
-    if index_exists:
-        logger.info("Existing FAISS index detected. Checking currently indexed PDFs...")
-        try:
-            api_key = os.getenv("GOOGLE_API_KEY")
-            if not api_key:
-                api_key = os.getenv("GOOGLE_API_KEY_1")
-            embeddings_model = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=api_key)
-            vectorstore = FAISS.load_local(
-                str(VECTORSTORE_DIR),
-                embeddings_model,
-                allow_dangerous_deserialization=True
-            )
-            if vectorstore and hasattr(vectorstore, "docstore") and hasattr(vectorstore.docstore, "_dict"):
-                existing_sources = {
-                    doc.metadata.get("source")
-                    for doc in vectorstore.docstore._dict.values()
-                    if doc.metadata.get("source")
-                }
-            logger.info("Loaded existing FAISS index. Indexed PDFs: %s", existing_sources)
-        except Exception as e:
-            logger.warning("Failed to load existing FAISS index: %s. Will rebuild index from scratch.", e)
-            vectorstore = None
-
-    # 2. Determine modification time of index
-    index_mtime = (VECTORSTORE_DIR / "index.faiss").stat().st_mtime if index_exists else 0.0
-
-    # 3. Identify modified PDFs
-    modified_pdfs = set()
-    for pdf_path in pdf_paths:
-        if pdf_path.name in existing_sources:
-            if pdf_path.stat().st_mtime > index_mtime:
-                modified_pdfs.add(pdf_path.name)
-
-    # 4. Determine additions, deletions, and updates
-    sources_to_delete = (existing_sources - active_pdfs) | modified_pdfs
-    sources_to_index = (active_pdfs - existing_sources) | modified_pdfs
-
-    logger.info("Sync Plan:\n       - Active PDFs: %s\n       - Already Indexed: %s\n       - To Delete/Re-index: %s\n       - To Generate/Add: %s", active_pdfs, existing_sources, sources_to_delete, sources_to_index)
+    logger.info("Sync Plan:\n       - Active PDFs: %s\n       - To Delete/Re-index: %s\n       - To Generate/Add: %s", active_pdfs, sources_to_delete, sources_to_index)
 
     # No changes required!
     if not sources_to_delete and not sources_to_index:
-        logger.info("FAISS vector store is already perfectly up to date. Skipping re-indexing.")
+        logger.info("Pinecone vector store is already perfectly up to date. Skipping re-indexing.")
         return True
 
-    # 5. Delete removed/modified PDF chunks from the loaded index
-    if sources_to_delete and vectorstore:
-        try:
-            ids_to_delete = [
-                doc_id for doc_id, doc in vectorstore.docstore._dict.items()
-                if doc.metadata.get("source") in sources_to_delete
-            ]
-            if ids_to_delete:
-                vectorstore.delete(ids_to_delete)
-                logger.info("Deleted %s old chunks from the index.", len(ids_to_delete))
-            # If after deletion the index becomes empty, set vectorstore to None so a new clean FAISS is initialized
-            if not vectorstore.docstore._dict:
-                logger.info("Index is now empty after deletions.")
-                vectorstore = None
-        except Exception as e:
-            logger.warning("Failed to delete chunks from existing index: %s. Will rebuild index from scratch.", e)
-            vectorstore = None
+    # 3. Delete removed/modified PDF chunks from the index
+    if sources_to_delete:
+        for source in sources_to_delete:
+            try:
+                # Note: This requires a Pinecone plan that supports metadata filtering deletes
+                index.delete(filter={"source": source}, namespace="pdfs")
+                logger.info("Deleted old chunks for %s from Pinecone.", source)
+                existing_sources.pop(source, None)
+            except Exception as e:
+                logger.warning("Failed to delete chunks for %s: %s", source, e)
 
-    # 6. Index new or modified documents
+    # 4. Index new or modified documents
     if sources_to_index:
         logger.info("Chunking new/modified documents: %s...", sources_to_index)
         chunks = chunk_all_text_files(str(OUTPUT_DIR), CHUNK_SIZE, CHUNK_OVERLAP, target_sources=sources_to_index)
@@ -279,36 +279,21 @@ def main() -> bool:
             logger.info("Generated %s chunks to index.", len(chunks))
             logger.info("Building embeddings for new chunks...")
             
-            temp_vectorstore = create_vectorstore(chunks)
-            if not temp_vectorstore:
-                logger.error("Failed to generate embeddings for new chunks.")
+            success = create_vectorstore(chunks)
+            if not success:
+                logger.error("Failed to generate and upload embeddings to Pinecone.")
                 return False
                 
-            if vectorstore is None:
-                # If there was no prior index or it was cleared, the temp index becomes our main index
-                vectorstore = temp_vectorstore
-            else:
-                # Merge the new FAISS index into our existing one
-                logger.info("Merging new chunks into the existing FAISS index...")
-                vectorstore.merge_from(temp_vectorstore)
-                logger.info("Merged new chunks successfully.")
+            # Update cache
+            for source in sources_to_index:
+                pdf_path = input_pdf_dir / source
+                if pdf_path.exists():
+                    existing_sources[source] = pdf_path.stat().st_mtime
 
-    # 7. Save the updated main index back to disk
-    if vectorstore:
-        try:
-            vectorstore.save_local(str(VECTORSTORE_DIR))
-            logger.info("FAISS vector store successfully saved to '%s'!", VECTORSTORE_DIR)
-            return True
-        except Exception as e:
-            logger.error("Failed to save FAISS index: %s", e)
-            return False
-    else:
-        # If vectorstore is None here, it means all PDFs were cleared
-        import shutil
-        if VECTORSTORE_DIR.exists():
-            shutil.rmtree(VECTORSTORE_DIR)
-        logger.info("Vector store is now completely empty.")
-        return True
+    # Save tracking cache
+    cache_file.write_text(json.dumps(existing_sources))
+    logger.info("Pinecone vector store successfully updated!")
+    return True
 
 if __name__ == "__main__":
     main()

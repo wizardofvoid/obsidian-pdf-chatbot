@@ -64,8 +64,15 @@ def render_message_with_source(content: str):
             unsafe_allow_html=True
         )
 
-def main():
+@st.cache_resource
+def init_config():
     config.init()
+    from git_sync import sync_obsidian_repo
+    sync_obsidian_repo()
+    return True
+
+def main():
+    init_config()
     st.set_page_config(page_title="Obsidian & PDF Brain Chat", layout="wide")
     inject_premium_styles()
     
@@ -77,6 +84,10 @@ def main():
     try:
         agent.get_index_status
         agent.clean_text_for_tts
+        if not st.session_state.get("_cache_busted", False):
+            st.cache_resource.clear()
+            st.session_state["_cache_busted"] = True
+            st.rerun()
     except AttributeError:
         st.cache_resource.clear()
         st.rerun()
@@ -118,7 +129,16 @@ def main():
                     else:
                         st.error(f"Sync failed: {res['error']}")
                         
-        st.markdown("---")
+            st.markdown("---")
+            st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Cloud Integration</h3>", unsafe_allow_html=True)
+            if st.button("Pull Latest Notes from GitHub", use_container_width=True):
+                with st.spinner("Pulling from GitHub..."):
+                    from git_sync import sync_obsidian_repo
+                    if sync_obsidian_repo():
+                        st.success("Successfully pulled latest notes from GitHub!")
+                        # Optionally, we could automatically run Neo4j sync here
+                    else:
+                        st.error("Failed to pull from GitHub. Check variables.")
         st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Voice Assistant</h3>", unsafe_allow_html=True)
         voice_mode = st.selectbox(
             "Voice input mode:",
@@ -150,36 +170,15 @@ def main():
         
         # Sync PDFs in storage with files currently uploaded in Streamlit
         if uploaded_files or st.session_state["prev_uploaded_files"]:
-            from pathlib import Path
-            from config import INPUT_PDF_DIR, OUTPUT_DIR
-            
-            input_dir = Path(INPUT_PDF_DIR)
-            input_dir.mkdir(exist_ok=True, parents=True)
-            
-            # Save new uploads
-            for uploaded_file in uploaded_files:
-                file_path = input_dir / uploaded_file.name
-                if not file_path.exists():
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    saved_names.append(uploaded_file.name)
+            from document_manager import DocumentManager
+            saved_names, removed_names, current_names = DocumentManager.sync_streamlit_uploads(
+                uploaded_files, st.session_state["prev_uploaded_files"]
+            )
             if saved_names:
                 st.success(f"Saved: {', '.join(saved_names)}")
-                
-            # Remove deleted uploads
-            for existing_file in input_dir.glob("*.pdf"):
-                if existing_file.name in st.session_state["prev_uploaded_files"] and existing_file.name not in uploaded_file_names:
-                    existing_file.unlink()
-                    removed_names.append(existing_file.name)
-                    # Clear its cached text files
-                    for ocr_state in ["True", "False"]:
-                        cache_file = Path(OUTPUT_DIR) / "cache" / f"{existing_file.name}_ocr_{ocr_state}.txt"
-                        if cache_file.exists():
-                            cache_file.unlink()
             if removed_names:
                 st.warning(f"Deleted from storage: {', '.join(removed_names)}")
-                
-            st.session_state["prev_uploaded_files"] = uploaded_file_names
+            st.session_state["prev_uploaded_files"] = current_names
             
         st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>2. Knowledge Indexing</h3>", unsafe_allow_html=True)
         
@@ -239,30 +238,16 @@ def main():
             st.success(f"Cleared history for session '{session_id}'.")
             
         if st.button("Factory Reset Storage", use_container_width=True):
-            import shutil
-            from pathlib import Path
-            from config import INPUT_PDF_DIR, OUTPUT_DIR, VECTORSTORE_DIR
-            
-            input_dir = Path(INPUT_PDF_DIR)
-            if input_dir.exists():
-                shutil.rmtree(input_dir)
-                input_dir.mkdir(parents=True, exist_ok=True)
-                
-            output_dir = Path(OUTPUT_DIR)
-            if output_dir.exists():
-                shutil.rmtree(output_dir)
-                output_dir.mkdir(parents=True, exist_ok=True)
-                
-            faiss_dir = Path(VECTORSTORE_DIR)
-            if faiss_dir.exists():
-                shutil.rmtree(faiss_dir)
-                
-            agent.reload()
-            agent.clear_session(session_id)
-            st.session_state["messages"] = []
-            st.session_state["prev_uploaded_files"] = []
-            st.cache_resource.clear()
-            st.success("Successfully cleared all PDFs, cache indexes, and chat memory!")
+            from document_manager import DocumentManager
+            if DocumentManager.factory_reset():
+                agent.reload()
+                agent.clear_session(session_id)
+                st.session_state["messages"] = []
+                st.session_state["prev_uploaded_files"] = []
+                st.cache_resource.clear()
+                st.success("Successfully cleared all PDFs, cache indexes, and chat memory!")
+            else:
+                st.error("Factory reset failed. See logs.")
             
     if "messages" not in st.session_state:
         st.session_state["messages"] = []

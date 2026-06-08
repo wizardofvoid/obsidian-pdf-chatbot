@@ -29,9 +29,10 @@ OBSIDIAN_VAULT_DIR = Path(os.getenv("OBSIDIAN_VAULT_DIR", str(BASE_DIR / "Obsidi
 OBSIDIAN_CACHE_FILE = OBSIDIAN_VAULT_DIR / ".linker_cache.json"
 OBSIDIAN_LINKER_PATH: Path = Path(os.getenv("OBSIDIAN_LINKER_PATH", str(BASE_DIR.parent / "obsidian-linker" / "main.py")))
 
-# Local vector index storage
-VECTORSTORE_DIR = BASE_DIR / "faiss_index"
-FAISS_INDEX_FILE = VECTORSTORE_DIR / "index.faiss"
+# Pinecone Vector Index storage
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "obsidian-brain")
+
 
 # Model configurations
 EMBEDDING_MODEL = "models/gemini-embedding-2"
@@ -55,3 +56,4 @@ def init() -> None:
 
     INPUT_PDF_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OBSIDIAN_VAULT_DIR.mkdir(parents=True, exist_ok=True)
