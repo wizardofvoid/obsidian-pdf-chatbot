@@ -1,79 +1,64 @@
 import os
-import sys
-import subprocess
 import logging
-from config import OBSIDIAN_VAULT_DIR, OBSIDIAN_LINKER_PATH
+import requests
+from config import OBSIDIAN_VAULT_DIR
 
 logger = logging.getLogger(__name__)
 
 def trigger_obsidian_linker() -> bool:
     """
-    Launches the Obsidian Linker (main.py) asynchronously in the background.
-    Uses the active python interpreter to maintain the conda environment context.
-    Passes the configured Obsidian vault path dynamically.
+    Triggers the Obsidian Linker FastAPI endpoint asynchronously.
     """
-    linker_main = str(OBSIDIAN_LINKER_PATH)
-    
-    if not OBSIDIAN_LINKER_PATH.exists():
-        logger.error("Obsidian Linker main.py not found at: %s", OBSIDIAN_LINKER_PATH)
+    api_url = os.getenv("LINKER_API_URL")
+    if not api_url:
+        logger.error("LINKER_API_URL not set in environment.")
         return False
         
+    repo_url = os.getenv("OBSIDIAN_REPO_URL")
+    token = os.getenv("GITHUB_TOKEN")
+    
     try:
-        # Prepare execution environment and arguments
-        env = {**os.environ, "OBSIDIAN_VAULT_DIR": str(OBSIDIAN_VAULT_DIR)}
-        args = [sys.executable, linker_main, "--dir", str(OBSIDIAN_VAULT_DIR)]
-        
-        # Run main.py asynchronously in the background
-        # DEVNULL discards the outputs so it runs silently
-        subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            close_fds=True if os.name != 'nt' else False
-        )
-        logger.info("Obsidian Linker triggered successfully in background for: %s", OBSIDIAN_VAULT_DIR)
+        payload = {
+            "github_url": repo_url,
+            "github_token": token
+        }
+        # Fire and forget (timeout=1 to avoid blocking, handle Timeout as success since it's background processing)
+        try:
+            requests.post(f"{api_url}/sync", json=payload, timeout=1)
+        except requests.exceptions.ReadTimeout:
+            pass
+        logger.info("Obsidian Linker API triggered successfully.")
         return True
     except Exception as e:
-        logger.error("Failed to launch background linker: %s", e)
+        logger.error(f"Failed to trigger linker API: {e}")
         return False
 
 def run_obsidian_linker_sync() -> bool:
     """
-    Runs the Obsidian Linker (main.py) synchronously, blocking until it completes.
-    Maintains the conda environment context.
-    Passes the configured Obsidian vault path dynamically.
+    Runs the Obsidian Linker sync synchronously via the API.
     """
-    linker_main = str(OBSIDIAN_LINKER_PATH)
-    
-    if not OBSIDIAN_LINKER_PATH.exists():
-        logger.error("Obsidian Linker main.py not found at: %s", OBSIDIAN_LINKER_PATH)
+    api_url = os.getenv("LINKER_API_URL")
+    if not api_url:
+        logger.error("LINKER_API_URL not set in environment.")
         return False
         
+    repo_url = os.getenv("OBSIDIAN_REPO_URL")
+    token = os.getenv("GITHUB_TOKEN")
+    
     try:
-        logger.info("Starting synchronous Obsidian Linker run for: %s...", OBSIDIAN_VAULT_DIR)
-        env = {**os.environ, "OBSIDIAN_VAULT_DIR": str(OBSIDIAN_VAULT_DIR)}
-        args = [sys.executable, linker_main, "--dir", str(OBSIDIAN_VAULT_DIR)]
+        logger.info("Starting synchronous Obsidian Linker API run...")
+        payload = {
+            "github_url": repo_url,
+            "github_token": token
+        }
+        response = requests.post(f"{api_url}/sync", json=payload, timeout=10)
         
-        result = subprocess.run(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            text=True
-        )
-        if result.returncode == 0:
-            logger.info("Obsidian Linker completed successfully.")
+        if response.status_code == 200:
+            logger.info("Obsidian Linker API responded successfully.")
             return True
         else:
-            logger.error("Linker failed with code %s: %s", result.returncode, result.stderr)
+            logger.error(f"Linker API failed with code {response.status_code}: {response.text}")
             return False
     except Exception as e:
-        logger.error("Failed to run linker synchronously: %s", e)
+        logger.error(f"Failed to run linker API synchronously: {e}")
         return False
-
-if __name__ == "__main__":
-    # Test execution in isolation
-    logger.info("Testing linker trigger...")
-    success = trigger_obsidian_linker()
-    logger.info("Trigger result: %s", success)
