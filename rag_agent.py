@@ -250,6 +250,9 @@ class RAGAgent:
                     if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
                         if self.rotate_groq_key():
                             continue
+                    if ("failed to call" in err_str.lower() or "failed_generation" in err_str.lower()) and attempt < max_retries - 1:
+                        logger.warning(f"Groq tool parsing failed. Retrying (Attempt {attempt+1}/{max_retries})...")
+                        continue
                     raise e
         except Exception as e:
             return ChatResult(answer="", error=str(e))
@@ -294,6 +297,9 @@ class RAGAgent:
                     if ("429" in err_str or "rate_limit" in err_str.lower()) and attempt < max_retries - 1:
                         if self.rotate_groq_key():
                             continue
+                    if ("failed to call" in err_str.lower() or "failed_generation" in err_str.lower()) and attempt < max_retries - 1:
+                        logger.warning(f"Groq tool parsing failed. Retrying (Attempt {attempt+1}/{max_retries})...")
+                        continue
                     yield f"[ERROR] {err_str}"
                     return
         except Exception as e:
