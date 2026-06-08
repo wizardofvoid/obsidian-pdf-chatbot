@@ -66,8 +66,6 @@ def render_message_with_source(content: str):
 
 @st.cache_resource
 def init_config():
-@st.cache_resource
-def init_config():
     config.init()
     from git_sync import sync_obsidian_repo
     sync_obsidian_repo()
@@ -176,15 +174,10 @@ def main():
             saved_names, removed_names, current_names = DocumentManager.sync_streamlit_uploads(
                 uploaded_files, st.session_state["prev_uploaded_files"]
             )
-            from document_manager import DocumentManager
-            saved_names, removed_names, current_names = DocumentManager.sync_streamlit_uploads(
-                uploaded_files, st.session_state["prev_uploaded_files"]
-            )
             if saved_names:
                 st.success(f"Saved: {', '.join(saved_names)}")
             if removed_names:
                 st.warning(f"Deleted from storage: {', '.join(removed_names)}")
-            st.session_state["prev_uploaded_files"] = current_names
             st.session_state["prev_uploaded_files"] = current_names
             
         st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>2. Knowledge Indexing</h3>", unsafe_allow_html=True)
@@ -245,16 +238,6 @@ def main():
             st.success(f"Cleared history for session '{session_id}'.")
             
         if st.button("Factory Reset Storage", use_container_width=True):
-            from document_manager import DocumentManager
-            if DocumentManager.factory_reset():
-                agent.reload()
-                agent.clear_session(session_id)
-                st.session_state["messages"] = []
-                st.session_state["prev_uploaded_files"] = []
-                st.cache_resource.clear()
-                st.success("Successfully cleared all PDFs, cache indexes, and chat memory!")
-            else:
-                st.error("Factory reset failed. See logs.")
             from document_manager import DocumentManager
             if DocumentManager.factory_reset():
                 agent.reload()
