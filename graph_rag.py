@@ -76,7 +76,7 @@ class Neo4jGraphRAG:
             results_with_scores = vectorstore.similarity_search_with_score(question, k=10)
             seen = set()
             for doc, score in results_with_scores:
-                if score <= 0.85:
+                if score >= 0.70:
                     note = doc.metadata.get("note")
                     if note and note not in seen:
                         seen.add(note)

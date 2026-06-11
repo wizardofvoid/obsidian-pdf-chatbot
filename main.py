@@ -84,10 +84,6 @@ def main():
     try:
         agent.get_index_status
         agent.clean_text_for_tts
-        if not st.session_state.get("_cache_busted", False):
-            st.cache_resource.clear()
-            st.session_state["_cache_busted"] = True
-            st.rerun()
     except AttributeError:
         st.cache_resource.clear()
         st.rerun()
@@ -104,41 +100,27 @@ def main():
         st.markdown("<h2 style='color:#FFFFFF; font-size:1.15rem; font-weight:600; margin-bottom:0.8rem; font-family:Inter, sans-serif;'>System Control</h2>", unsafe_allow_html=True)
         session_id = st.text_input("Session ID", value="default_session")
         
-        st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Knowledge Scope</h3>", unsafe_allow_html=True)
-        rag_mode = st.selectbox(
-            "Select retriever mode:",
-            options=["PDF Textbook Only", "Obsidian Vault Graph Only", "Hybrid (PDF + Obsidian)"],
-            index=0
-        )
+        # Knowledge retriever is Hybrid by default (PDF + Obsidian)
+        selected_mode = "hybrid"
         
-        mode_mapping = {
-            "PDF Textbook Only": "pdf",
-            "Obsidian Vault Graph Only": "obsidian",
-            "Hybrid (PDF + Obsidian)": "hybrid"
-        }
-        selected_mode = mode_mapping[rag_mode]
-        
-        if selected_mode in ("obsidian", "hybrid"):
-            st.markdown("---")
-            if st.button("Sync Obsidian Brain", use_container_width=True):
-                with st.spinner("Scanning and re-indexing vault for new manual notes..."):
-                    res = agent.sync_obsidian_vault()
-                    if res["success"]:
-                        st.success("Obsidian index synchronized successfully!")
-                        st.cache_resource.clear()
-                    else:
-                        st.error(f"Sync failed: {res['error']}")
-                        
-            st.markdown("---")
-            st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Cloud Integration</h3>", unsafe_allow_html=True)
-            if st.button("Pull Latest Notes from GitHub", use_container_width=True):
-                with st.spinner("Pulling from GitHub..."):
-                    from git_sync import sync_obsidian_repo
-                    if sync_obsidian_repo():
-                        st.success("Successfully pulled latest notes from GitHub!")
-                        # Optionally, we could automatically run Neo4j sync here
-                    else:
-                        st.error("Failed to pull from GitHub. Check variables.")
+        st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Obsidian Control</h3>", unsafe_allow_html=True)
+        if st.button("Sync Obsidian Brain", use_container_width=True):
+            with st.spinner("Scanning and re-indexing vault for new manual notes..."):
+                res = agent.sync_obsidian_vault()
+                if res["success"]:
+                    st.success("Obsidian index synchronized successfully!")
+                    st.cache_resource.clear()
+                else:
+                    st.error(f"Sync failed: {res['error']}")
+                    
+        st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Cloud Integration</h3>", unsafe_allow_html=True)
+        if st.button("Pull Latest Notes from GitHub", use_container_width=True):
+            with st.spinner("Pulling from GitHub..."):
+                from git_sync import sync_obsidian_repo
+                if sync_obsidian_repo():
+                    st.success("Successfully pulled latest notes from GitHub!")
+                else:
+                    st.error("Failed to pull from GitHub. Check variables.")
         st.markdown("<h3 style='color:#9AA0A6; font-size:0.9rem; font-weight:500; margin-bottom:0.4rem; font-family:Inter, sans-serif;'>Voice Assistant</h3>", unsafe_allow_html=True)
         voice_mode = st.selectbox(
             "Voice input mode:",
@@ -288,9 +270,9 @@ def main():
                             st.error(f"Failed to save note: {res['error']}")
                 st.markdown("---")
             
-    if selected_mode in ("pdf", "hybrid") and not agent.index_ready():
-        st.info("No PDF Index detected. Upload your study materials in the sidebar and click 'Extract & Build Index' to get started.")
-        st.stop()
+    # If the PDF index is not ready, we warn the user but don't block the chatbot
+    if not agent.index_ready():
+        st.sidebar.warning("⚠️ No PDF Index detected. Upload PDFs and sync the index to enable PDF search.")
         
     question = st.chat_input("Ask a question about your documents...")
     

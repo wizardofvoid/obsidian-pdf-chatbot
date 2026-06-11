@@ -53,7 +53,7 @@ def transcribe_audio_groq(audio_bytes: bytes, format: str, translate: bool = Fal
         "prompt": prompt_instruction,
         "response_format": "json"
     }
-    if language:
+    if language and not translate:
         data["language"] = language
         
     response = requests.post(url, headers=headers, files=files, data=data, timeout=30)

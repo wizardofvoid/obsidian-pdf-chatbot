@@ -112,7 +112,7 @@ class RAGAgent:
     def _load_agent(self) -> Any:
         if self._agent_executor is None:
             groq_key = self._get_groq_key()
-            llm = ChatGroq(groq_api_key=groq_key, model=LLM_MODEL)
+            llm = ChatGroq(groq_api_key=groq_key, model=LLM_MODEL, temperature=0.0)
             
             from langchain_core.tools import tool
             
@@ -126,10 +126,29 @@ class RAGAgent:
                     docs = vectorstore.similarity_search_with_score(query, k=5)
                     chunks = []
                     for doc, score in docs:
-                        if score <= 0.85:
+                        if score >= 0.70:
                             chunks.append(doc.page_content)
                             self._current_citations.append({"source": doc.metadata.get("source"), "page": doc.metadata.get("page")})
                     if not chunks:
+                        # Fallback for generic/meta queries: fetch page 1 and page 2 of all indexed PDFs as context
+                        status = self.get_index_status()
+                        indexed_files = status.get("indexed_files", [])
+                        if indexed_files:
+                            fallback_chunks = []
+                            for filename in indexed_files:
+                                for page_num in [1, 2]:
+                                    try:
+                                        res_docs = vectorstore.similarity_search(
+                                            query="title overview introduction index",
+                                            k=1,
+                                            filter={"source": filename, "page": page_num}
+                                        )
+                                        if res_docs:
+                                            fallback_chunks.append(f"--- File: {filename} (Page {page_num}) ---\n{res_docs[0].page_content}")
+                                            self._current_citations.append({"source": filename, "page": page_num})
+                                    except: pass
+                            if fallback_chunks:
+                                return "\n\n".join(fallback_chunks)
                         return "No relevant PDF materials found."
                     return "\n\n".join(chunks)
                 except Exception as e:
@@ -145,7 +164,7 @@ class RAGAgent:
                 return res["context"]
                 
             @tool
-            def scan_obsidian_tasks(dummy: str = "") -> str:
+            def scan_obsidian_tasks() -> str:
                 """Scan the entire Obsidian vault for pending or completed tasks (checkboxes - [ ] or - [x])."""
                 from config import OBSIDIAN_VAULT_DIR
                 vault_path = Path(OBSIDIAN_VAULT_DIR)
@@ -163,7 +182,7 @@ class RAGAgent:
                 return "No tasks found."
                 
             @tool
-            def list_obsidian_notes(dummy: str = "") -> str:
+            def list_obsidian_notes() -> str:
                 """List all available markdown notes in the Obsidian vault."""
                 from config import OBSIDIAN_VAULT_DIR
                 vault_path = Path(OBSIDIAN_VAULT_DIR)
@@ -199,14 +218,23 @@ class RAGAgent:
                         return f"Error reading note: {e}"
                 return f"Note '{note_title}' not found in the vault."
                 
+            @tool
+            def list_indexed_pdfs() -> str:
+                """List the filenames of all PDF files that are currently uploaded and indexed in the system."""
+                status = self.get_index_status()
+                indexed = status.get("indexed_files", [])
+                if not indexed:
+                    return "No PDFs are currently indexed."
+                return "Indexed PDF Files:\n" + "\n".join(f"- {name}" for name in indexed)
+                
             from langgraph.prebuilt import create_react_agent
             system_message = (
                 "You are an expert personal study assistant. You have access to tools to search the user's Obsidian notes, PDF materials, and tasks.\n"
-                "If you need to search, you MUST use the tools. DO NOT output any conversational text before or alongside a tool call.\n"
-                "If the user asks a normal question that doesn't need search, just answer normally."
+                "Use the search tools when you need to retrieve factual information from study materials or notes to answer the user's questions.\n"
+                "If the user's query can be answered using general knowledge or does not require searching, respond directly."
             )
             
-            self._agent_executor = create_react_agent(llm, tools=[search_pdf_materials, search_obsidian_graph, scan_obsidian_tasks, list_obsidian_notes, read_obsidian_note], prompt=system_message)
+            self._agent_executor = create_react_agent(llm, tools=[search_pdf_materials, search_obsidian_graph, scan_obsidian_tasks, list_obsidian_notes, read_obsidian_note, list_indexed_pdfs], prompt=system_message)
             
         return self._agent_executor
 
@@ -219,8 +247,137 @@ class RAGAgent:
         et.main(skip_ocr=skip_ocr)
         ok = tc.main()
         if ok:
+            try:
+                self.extract_pdf_knowledge_to_obsidian()
+            except Exception as e:
+                logger.error(f"Failed in PDF knowledge extraction: {e}")
             self.reload()
         return ok
+
+    def extract_pdf_knowledge_to_obsidian(self) -> None:
+        import json
+        import re
+        from pathlib import Path
+        from config import OBSIDIAN_VAULT_DIR, INPUT_PDF_DIR, OUTPUT_DIR
+        
+        status = self.get_index_status()
+        indexed_files = status.get("indexed_files", [])
+        if not indexed_files:
+            logger.info("No indexed files found. Skipping PDF knowledge extraction.")
+            return
+
+        # Load processed list to prevent duplicate LLM calls
+        processed_file = Path(INPUT_PDF_DIR) / ".processed_pdfs.json"
+        processed = set()
+        if processed_file.exists():
+            try:
+                processed = set(json.loads(processed_file.read_text()))
+            except: pass
+
+        new_notes_created = False
+        vault_path = Path(OBSIDIAN_VAULT_DIR)
+        cache_dir = Path(OUTPUT_DIR) / "cache"
+
+        for pdf_name in indexed_files:
+            if pdf_name in processed:
+                continue
+            
+            logger.info(f"Extracting key concepts from {pdf_name} to generate Obsidian notes...")
+            # Locate cached text file
+            txt_file = cache_dir / f"{pdf_name}_ocr_False.txt"
+            if not txt_file.exists():
+                txt_file = cache_dir / f"{pdf_name}_ocr_True.txt"
+            
+            if not txt_file.exists():
+                logger.warning(f"No cached text file found for {pdf_name}, skipping concept generation.")
+                continue
+
+            try:
+                # Read the first 25,000 characters to extract core concepts from intro/syllabus/outcomes
+                full_text = txt_file.read_text(encoding="utf-8")
+                sample_text = full_text[:25000]
+
+                # Initialize LLM
+                api_key = self._get_groq_key()
+                llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", temperature=0.0)
+                
+                # Define system message
+                system_msg = (
+                    "You are an expert academic curriculum analyzer. Your task is to analyze the introductory text "
+                    "and syllabus of a study material PDF, identify the core concepts/topics, and generate structured "
+                    "atomic Markdown study notes for each key concept that is not already present.\n\n"
+                    "Return the output as a valid JSON object with a key 'notes' containing a list of objects. "
+                    "Each object in the 'notes' list MUST have:\n"
+                    "1. 'title': A concise 2-4 word concept name (e.g. 'Cloud Service Models').\n"
+                    "2. 'tags': A list of tags (e.g. ['#cloud', '#architecture']).\n"
+                    "3. 'content': A detailed study note in Markdown format describing this concept. Include YAML frontmatter at the top of the content with title, tags, and summary.\n\n"
+                    "Example output format:\n"
+                    "{\n"
+                    "  \"notes\": [\n"
+                    "    {\n"
+                    "      \"title\": \"Cloud Service Models\",\n"
+                    "      \"tags\": [\"#cloud\", \"#architecture\"],\n"
+                    "      \"content\": \"---\\ntitle: Cloud Service Models\\ntags: [#cloud, #architecture]\\nsummary: Explanation of IaaS, PaaS, and SaaS.\\n---\\n\\n# Cloud Service Models...\"\n"
+                    "    }\n"
+                    "  ]\n"
+                    "}"
+                )
+                
+                from langchain_core.messages import SystemMessage, HumanMessage
+                messages = [
+                    SystemMessage(content=system_msg),
+                    HumanMessage(content=f"Here is the introductory text of the study material PDF:\n\n{sample_text}")
+                ]
+                
+                # Request JSON output
+                res = llm.invoke(messages)
+                content = res.content.strip()
+                
+                # Clean JSON codeblock wrapper if present
+                if content.startswith("```json"):
+                    content = content[7:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
+                
+                data = json.loads(content)
+                notes_list = data.get("notes", [])
+                
+                for note_data in notes_list:
+                    title = note_data.get("title", "").strip()
+                    note_content = note_data.get("content", "").strip()
+                    if not title or not note_content:
+                        continue
+                    
+                    # Clean title for filename
+                    clean_title = re.sub(r'[\\/*?:"<>|]', "", title).strip()
+                    if not clean_title:
+                        continue
+                    
+                    note_file = vault_path / f"{clean_title}.md"
+                    if not note_file.exists():
+                        note_file.write_text(note_content, encoding="utf-8")
+                        logger.info(f"Auto-created note: {note_file.name}")
+                        new_notes_created = True
+                    else:
+                        logger.info(f"Note '{clean_title}' already exists. Skipping.")
+                
+                processed.add(pdf_name)
+            except Exception as ex:
+                logger.error(f"Failed to generate concepts for {pdf_name}: {ex}")
+
+        # Save processed files
+        try:
+            processed_file.write_text(json.dumps(list(processed)), encoding="utf-8")
+        except: pass
+
+        # If any new notes were written, run Obsidian linker and Neo4j sync to update the graph database
+        if new_notes_created:
+            logger.info("New notes created. Running Obsidian Linker and Neo4j Graph Database Sync...")
+            from linker_trigger import run_obsidian_linker_sync
+            import subprocess
+            if run_obsidian_linker_sync():
+                subprocess.run(["python", "neo4j_sync.py"], check=False)
 
     def clear_session(self, session_id: str) -> None:
         self._session_store.pop(session_id, None)
@@ -251,7 +408,7 @@ class RAGAgent:
                         if self.rotate_groq_key():
                             continue
                     if ("failed to call" in err_str.lower() or "failed_generation" in err_str.lower()) and attempt < max_retries - 1:
-                        logger.warning(f"Groq tool parsing failed. Retrying (Attempt {attempt+1}/{max_retries})...")
+                        logger.warning(f"Groq tool parsing failed on attempt {attempt+1}/{max_retries}: {err_str}. Retrying...")
                         continue
                     raise e
         except Exception as e:
@@ -298,7 +455,7 @@ class RAGAgent:
                         if self.rotate_groq_key():
                             continue
                     if ("failed to call" in err_str.lower() or "failed_generation" in err_str.lower()) and attempt < max_retries - 1:
-                        logger.warning(f"Groq tool parsing failed. Retrying (Attempt {attempt+1}/{max_retries})...")
+                        logger.warning(f"Groq tool parsing failed on attempt {attempt+1}/{max_retries}: {err_str}. Retrying...")
                         continue
                     yield f"[ERROR] {err_str}"
                     return
@@ -313,7 +470,7 @@ class RAGAgent:
         
         try:
             api_key = self._get_groq_key()
-            llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", max_tokens=1500)
+            llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", max_tokens=1500, temperature=0.0)
             from prompts import DISTILL_NOTE_PROMPT
             chain = DISTILL_NOTE_PROMPT | llm | StrOutputParser()
             note_content = chain.invoke({"question": question, "answer": answer, "citations": str(citations)})
@@ -340,10 +497,13 @@ class RAGAgent:
 
     def sync_obsidian_vault(self) -> dict:
         from linker_trigger import run_obsidian_linker_sync
+        from git_sync import sync_obsidian_repo
         import subprocess
         try:
             success = run_obsidian_linker_sync()
             if success:
+                # Pull the updated cache file and notes from GitHub first
+                sync_obsidian_repo()
                 # Trigger neo4j_sync.py to push the new cache to Neo4j
                 subprocess.run(["python", "neo4j_sync.py"], check=False)
                 self.reload()
