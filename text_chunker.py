@@ -1,29 +1,22 @@
 import os
 import re
 import logging
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-# pyrefly: ignore [missing-import]
 from langchain_core.documents import Document
-# pyrefly: ignore [missing-import]
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-# pyrefly: ignore [missing-import]
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
-# pyrefly: ignore [missing-import]
-from langchain_community.vectorstores import FAISS
 
-# Load environment variables (e.g., GOOGLE_API_KEY)
 load_dotenv()
 
-# =========================================================
-# CONFIG
-# =========================================================
 from config import OUTPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, INPUT_PDF_DIR, PINECONE_API_KEY, PINECONE_INDEX_NAME
 from pinecone import Pinecone as PineconeClient
 from langchain_pinecone import PineconeVectorStore
+
 
 def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, target_sources: set[str] = None) -> list[Document]:
     """
@@ -44,7 +37,6 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
     texts = []
     metadatas = []
 
-    # Find the active PDF cache files
     pdf_paths = sorted(input_pdf_dir.glob("*.pdf"))
     if not pdf_paths:
         logger.warning("No PDF files found to index.")
@@ -59,10 +51,7 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
 
         cache_file = None
         if cache_file_true.exists() and cache_file_false.exists():
-            if cache_file_true.stat().st_mtime >= cache_file_false.stat().st_mtime:
-                cache_file = cache_file_true
-            else:
-                cache_file = cache_file_false
+            cache_file = cache_file_true if cache_file_true.stat().st_mtime >= cache_file_false.stat().st_mtime else cache_file_false
         elif cache_file_true.exists():
             cache_file = cache_file_true
         elif cache_file_false.exists():
@@ -75,28 +64,23 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
         logger.info("Parsing cache file: %s", cache_file.name)
         try:
             content = cache_file.read_text(encoding="utf-8")
-            
-            # Parse pages
             pattern = r"--- Page (\d+) ---\n"
             parts = re.split(pattern, content)
-            
+
             pages = []
             if len(parts) > 1:
                 for i in range(1, len(parts), 2):
                     page_num = int(parts[i])
-                    page_text = parts[i+1].strip()
+                    page_text = parts[i + 1].strip()
                     if page_text:
                         pages.append((page_num, page_text))
-            
+
             if not pages and content.strip():
                 pages.append((1, content.strip()))
 
             for page_num, page_text in pages:
                 texts.append(page_text)
-                metadatas.append({
-                    "source": pdf_path.name,
-                    "page": page_num
-                })
+                metadatas.append({"source": pdf_path.name, "page": page_num})
         except Exception as e:
             logger.error("Failed to read or parse cache for %s: %s", pdf_path.name, e)
 
@@ -105,7 +89,6 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
         return []
 
     logger.info("Initializing token-aware text splitter (Size: %s, Overlap: %s)...", chunk_size, chunk_overlap)
-    
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         encoding_name="cl100k_base",
         chunk_size=chunk_size,
@@ -117,9 +100,60 @@ def chunk_all_text_files(input_dir: str, chunk_size: int, chunk_overlap: int, ta
     docs = splitter.create_documents(texts, metadatas=metadatas)
     return docs
 
+
+def _get_google_keys() -> list[str]:
+    keys = []
+    if os.getenv("GOOGLE_API_KEY"):
+        keys.append(os.getenv("GOOGLE_API_KEY"))
+    for i in range(1, 10):
+        k = os.getenv(f"GOOGLE_API_KEY_{i}")
+        if k and k not in keys:
+            keys.append(k)
+    if not keys:
+        raise ValueError("No GOOGLE_API_KEY or GOOGLE_API_KEY_N found in .env")
+    return keys
+
+
+def _embed_with_retry(batch: list[str], max_retries: int = 8) -> list:
+    """
+    Embed a batch of texts using embed_documents() with key rotation and backoff.
+    """
+    keys = _get_google_keys()
+    key_idx = 0
+    
+    for attempt in range(max_retries):
+        api_key = keys[key_idx]
+        try:
+            embeddings_model = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=api_key)
+            return embeddings_model.embed_documents(batch)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "rate limit" in err_msg or "429" in err_msg or "resource_exhausted" in err_msg or "quota" in err_msg:
+                if len(keys) > 1:
+                    old_idx = key_idx
+                    key_idx = (key_idx + 1) % len(keys)
+                    logger.warning(
+                        "Google embedding rate limit hit (429). Rotating key: %s -> %s",
+                        old_idx + 1, key_idx + 1
+                    )
+                    time.sleep(2)
+                    continue
+                else:
+                    delay = 5 * (2 ** attempt)
+                    logger.warning(
+                        "Rate limit on batch embed (attempt %s/%s). Backing off %ss...",
+                        attempt + 1, max_retries, delay
+                    )
+                    time.sleep(delay)
+                    continue
+            raise
+    raise RuntimeError(f"Embedding failed after {max_retries} attempts.")
+
+
 def create_vectorstore(docs: list[Document]):
     """
-    Generates embeddings for documents and creates an in-memory FAISS vector store.
+    Generates embeddings for documents in batches and upserts to Pinecone.
+    Uses embed_documents() for O(n/batch) API calls instead of O(n).
     """
     if not docs:
         return None
@@ -127,81 +161,53 @@ def create_vectorstore(docs: list[Document]):
     chunks = [doc.page_content for doc in docs]
     metadatas = [doc.metadata for doc in docs]
 
-    logger.info("Initializing Google Embeddings Model (%s)...", EMBEDDING_MODEL)
-    
+    # --- Batch embedding: single API call per batch instead of one per chunk ---
+    EMBED_BATCH_SIZE = 50  # Gemini supports up to 100 texts per embed_documents call
+    all_embeddings = []
+
+    logger.info("Generating embeddings for %s chunks in batches of %s...", len(chunks), EMBED_BATCH_SIZE)
+    for i in range(0, len(chunks), EMBED_BATCH_SIZE):
+        batch = chunks[i: i + EMBED_BATCH_SIZE]
+        logger.info("  Embedding batch %s/%s (%s chunks)...",
+                    i // EMBED_BATCH_SIZE + 1,
+                    (len(chunks) + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE,
+                    len(batch))
+        try:
+            batch_embeddings = _embed_with_retry(batch)
+            all_embeddings.extend(batch_embeddings)
+        except Exception as e:
+            logger.error("Failed to embed batch starting at chunk %s: %s", i, e)
+            return False
+
+    logger.info("All %s embeddings generated successfully.", len(all_embeddings))
+
+    # --- Pinecone upsert in batches of 200 ---
     try:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            api_key = os.getenv("GOOGLE_API_KEY_1")
-        embeddings_model = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=api_key)
-    except Exception as e:
-        logger.error("Failed to initialize embeddings model. Make sure GOOGLE_API_KEY is set. Details: %s", e)
-        return None
-
-    try:
-        import concurrent.futures
-        import time
-        
-        embeddings_list = [None] * len(chunks)
-        logger.info("Generating embeddings for %s chunks concurrently with safe throttling...", len(chunks))
-
-        def embed_single_chunk(item):
-            idx, chunk = item
-            last_error = None
-            for attempt in range(5):
-                try:
-                    # Space out requests naturally to avoid hitting the burst RPM limit
-                    time.sleep(0.15)
-                    return idx, embeddings_model.embed_query(chunk)
-                except Exception as e:
-                    last_error = e
-                    err_msg = str(e).lower()
-                    if "rate limit" in err_msg or "429" in err_msg or "resource_exhausted" in err_msg:
-                        delay = 4 * (attempt + 1)
-                        logger.warning("Rate limit hit on chunk %s (Attempt %s/5). Backing off for %ss...", idx + 1, attempt + 1, delay)
-                        time.sleep(delay)
-                        continue
-                    time.sleep(1)
-            
-            logger.error("Failed to embed chunk %s after 5 attempts: %s", idx + 1, last_error)
-            raise last_error
-
-        # Use max_workers=2 to prevent rapid concurrent request bursts
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            results = list(executor.map(embed_single_chunk, enumerate(chunks)))
-            
-        for idx, emb in results:
-            embeddings_list[idx] = emb
-            
-        logger.info("All embeddings generated successfully.")
-        
         import uuid
-        ids = [str(uuid.uuid4()) for _ in chunks]
-        text_embeddings = list(zip(chunks, embeddings_list))
-        
-        # Initialize Pinecone Client
         pc = PineconeClient(api_key=PINECONE_API_KEY)
         index = pc.Index(PINECONE_INDEX_NAME)
-        
-        # Upsert in batches of 100
-        batch_size = 100
-        for i in range(0, len(text_embeddings), batch_size):
-            batch = text_embeddings[i:i+batch_size]
-            batch_ids = ids[i:i+batch_size]
-            batch_meta = metadatas[i:i+batch_size]
-            
+
+        UPSERT_BATCH_SIZE = 200
+        total_upserted = 0
+        for i in range(0, len(chunks), UPSERT_BATCH_SIZE):
+            batch_chunks = chunks[i: i + UPSERT_BATCH_SIZE]
+            batch_embs = all_embeddings[i: i + UPSERT_BATCH_SIZE]
+            batch_meta = metadatas[i: i + UPSERT_BATCH_SIZE]
+
             vectors = []
-            for j, (text, emb) in enumerate(batch):
-                meta = batch_meta[j]
-                meta["text"] = text  # Langchain Pinecone requires text in metadata
-                vectors.append((batch_ids[j], emb, meta))
-                
+            for chunk_text, emb, meta in zip(batch_chunks, batch_embs, batch_meta):
+                meta_with_text = {**meta, "text": chunk_text}
+                vectors.append((str(uuid.uuid4()), emb, meta_with_text))
+
             index.upsert(vectors=vectors, namespace="pdfs")
-            
+            total_upserted += len(vectors)
+            logger.info("  Upserted %s/%s vectors to Pinecone.", total_upserted, len(chunks))
+
         return True
     except Exception as e:
-        logger.error("Pinecone creation failed: %s", e)
+        logger.error("Pinecone upsert failed: %s", e)
         return False
+
 
 def main() -> bool:
     input_pdf_dir = Path(INPUT_PDF_DIR)
@@ -211,23 +217,16 @@ def main() -> bool:
     pc = PineconeClient(api_key=PINECONE_API_KEY)
     index = pc.Index(PINECONE_INDEX_NAME)
 
-    # 1. Identify which PDFs are already in the Pinecone namespace
-    # Since Pinecone doesn't easily let us list all distinct metadata values,
-    # we use a local cache file to track what we've indexed from this machine.
-    # In a fully serverless environment, this means we rebuild if the file is lost,
-    # or we just rely on active_pdfs.
     import json
     cache_file = input_pdf_dir / ".pinecone_sync_cache.json"
-    
+
     existing_sources = {}
     if cache_file.exists():
         try:
             existing_sources = json.loads(cache_file.read_text())
-        except:
+        except Exception:
             pass
 
-    # If no PDFs exist at all locally, we should probably clear the namespace 
-    # but ONLY if we are tracking them. For now, we assume local is source of truth.
     if not active_pdfs:
         try:
             index.delete(delete_all=True, namespace="pdfs")
@@ -238,11 +237,9 @@ def main() -> bool:
             logger.error("Failed to clear Pinecone: %s", e)
         return True
 
-    # 2. Determine additions, deletions, and updates
     sources_to_delete = set(existing_sources.keys()) - active_pdfs
     sources_to_index = active_pdfs - set(existing_sources.keys())
-    
-    # Check for modifications
+
     for pdf_name in active_pdfs:
         if pdf_name in existing_sources:
             pdf_path = input_pdf_dir / pdf_name
@@ -250,50 +247,46 @@ def main() -> bool:
                 sources_to_delete.add(pdf_name)
                 sources_to_index.add(pdf_name)
 
-    logger.info("Sync Plan:\n       - Active PDFs: %s\n       - To Delete/Re-index: %s\n       - To Generate/Add: %s", active_pdfs, sources_to_delete, sources_to_index)
+    logger.info(
+        "Sync Plan:\n       - Active PDFs: %s\n       - To Delete/Re-index: %s\n       - To Generate/Add: %s",
+        active_pdfs, sources_to_delete, sources_to_index
+    )
 
-    # No changes required!
     if not sources_to_delete and not sources_to_index:
-        logger.info("Pinecone vector store is already perfectly up to date. Skipping re-indexing.")
+        logger.info("Pinecone vector store is already up to date. Skipping re-indexing.")
         return True
 
-    # 3. Delete removed/modified PDF chunks from the index
     if sources_to_delete:
         for source in sources_to_delete:
             try:
-                # Note: This requires a Pinecone plan that supports metadata filtering deletes
                 index.delete(filter={"source": source}, namespace="pdfs")
                 logger.info("Deleted old chunks for %s from Pinecone.", source)
                 existing_sources.pop(source, None)
             except Exception as e:
                 logger.warning("Failed to delete chunks for %s: %s", source, e)
 
-    # 4. Index new or modified documents
     if sources_to_index:
         logger.info("Chunking new/modified documents: %s...", sources_to_index)
         chunks = chunk_all_text_files(str(OUTPUT_DIR), CHUNK_SIZE, CHUNK_OVERLAP, target_sources=sources_to_index)
-        
+
         if not chunks:
             logger.warning("No text chunks generated for the new/modified documents.")
         else:
-            logger.info("Generated %s chunks to index.", len(chunks))
-            logger.info("Building embeddings for new chunks...")
-            
+            logger.info("Generated %s chunks. Building and uploading embeddings...", len(chunks))
             success = create_vectorstore(chunks)
             if not success:
                 logger.error("Failed to generate and upload embeddings to Pinecone.")
                 return False
-                
-            # Update cache
+
             for source in sources_to_index:
                 pdf_path = input_pdf_dir / source
                 if pdf_path.exists():
                     existing_sources[source] = pdf_path.stat().st_mtime
 
-    # Save tracking cache
     cache_file.write_text(json.dumps(existing_sources))
     logger.info("Pinecone vector store successfully updated!")
     return True
+
 
 if __name__ == "__main__":
     main()

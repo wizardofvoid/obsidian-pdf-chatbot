@@ -1,5 +1,6 @@
 import os
 import logging
+import contextvars
 from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,22 +27,46 @@ class ChatResult:
     context_chunks: list[str] = field(default_factory=list)
     error: str | None = None
 
+# ContextVar to hold call-scoped citations list safely (prevents session bleed in Streamlit)
+current_citations_var = contextvars.ContextVar("current_citations", default=None)
+
 class RAGAgent:
     """Agentic RAG pipeline: retrieves from Neo4j Graph and Pinecone PDFs using autonomous tools."""
 
     def __init__(self):
         self._vectorstore: PineconeVectorStore | None = None
+        self._embeddings: GoogleGenerativeAIEmbeddings | None = None
         self._agent_executor = None
+        self._llm: ChatGroq | None = None
         self._session_store: dict[str, InMemoryChatMessageHistory] = {}
         self._graph_rag = None
         self._current_key_idx = 1
-        self._current_citations = []
 
     def _get_graph_rag(self):
         if self._graph_rag is None:
             from graph_rag import Neo4jGraphRAG
             self._graph_rag = Neo4jGraphRAG()
         return self._graph_rag
+
+    def _get_embeddings(self) -> GoogleGenerativeAIEmbeddings:
+        """Cached embeddings object — expensive to create, safe to reuse."""
+        if self._embeddings is None:
+            google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY_1")
+            self._embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=google_key)
+        return self._embeddings
+
+    def _get_groq_key(self) -> str:
+        key = os.getenv("GROQ_API_KEY")
+        if key: return key
+        k = os.getenv(f"GROQ_API_KEY_{self._current_key_idx}")
+        if k: return k
+        return os.getenv("GROQ_API_KEY_1")
+
+    def _get_llm(self) -> ChatGroq:
+        """Cached LLM — only rebuilt when the key is rotated."""
+        if self._llm is None:
+            self._llm = ChatGroq(groq_api_key=self._get_groq_key(), model=LLM_MODEL, temperature=0.0)
+        return self._llm
 
     @staticmethod
     def env_configured() -> bool:
@@ -79,24 +104,15 @@ class RAGAgent:
 
     def _load_vectorstore(self) -> PineconeVectorStore:
         if self._vectorstore is None:
-            google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY_1")
-            embeddings = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL, google_api_key=google_key)
             pc = PineconeClient(api_key=PINECONE_API_KEY)
-            index = pc.Index(PINECONE_INDEX_NAME)
+            pc.Index(PINECONE_INDEX_NAME)
             self._vectorstore = PineconeVectorStore(
                 index_name=PINECONE_INDEX_NAME,
-                embedding=embeddings,
+                embedding=self._get_embeddings(),
                 namespace="pdfs",
                 pinecone_api_key=PINECONE_API_KEY
             )
         return self._vectorstore
-
-    def _get_groq_key(self) -> str:
-        key = os.getenv("GROQ_API_KEY")
-        if key: return key
-        k = os.getenv(f"GROQ_API_KEY_{self._current_key_idx}")
-        if k: return k
-        return os.getenv("GROQ_API_KEY_1")
 
     def rotate_groq_key(self) -> bool:
         old_idx = self._current_key_idx
@@ -104,138 +120,147 @@ class RAGAgent:
             next_idx = ((old_idx + offset - 1) % 9) + 1
             if os.getenv(f"GROQ_API_KEY_{next_idx}"):
                 self._current_key_idx = next_idx
+                self._llm = None
                 self._agent_executor = None
-                logger.info(f"Rotated key index: {old_idx} -> {self._current_key_idx}")
+                logger.info("Rotated Groq key: %s -> %s", old_idx, self._current_key_idx)
                 return True
         return False
 
     def _load_agent(self) -> Any:
-        if self._agent_executor is None:
-            groq_key = self._get_groq_key()
-            llm = ChatGroq(groq_api_key=groq_key, model=LLM_MODEL, temperature=0.0)
-            
-            from langchain_core.tools import tool
-            
-            @tool
-            def search_pdf_materials(query: str) -> str:
-                """Search uploaded PDF textbooks and study materials for factual knowledge."""
-                if not self.index_ready():
-                    return "No PDFs indexed."
-                try:
-                    vectorstore = self._load_vectorstore()
-                    docs = vectorstore.similarity_search_with_score(query, k=5)
-                    chunks = []
-                    for doc, score in docs:
-                        if score >= 0.70:
-                            chunks.append(doc.page_content)
-                            self._current_citations.append({"source": doc.metadata.get("source"), "page": doc.metadata.get("page")})
-                    if not chunks:
-                        # Fallback for generic/meta queries: fetch page 1 and page 2 of all indexed PDFs as context
-                        status = self.get_index_status()
-                        indexed_files = status.get("indexed_files", [])
-                        if indexed_files:
-                            fallback_chunks = []
-                            for filename in indexed_files:
-                                for page_num in [1, 2]:
-                                    try:
-                                        res_docs = vectorstore.similarity_search(
-                                            query="title overview introduction index",
-                                            k=1,
-                                            filter={"source": filename, "page": page_num}
-                                        )
-                                        if res_docs:
-                                            fallback_chunks.append(f"--- File: {filename} (Page {page_num}) ---\n{res_docs[0].page_content}")
-                                            self._current_citations.append({"source": filename, "page": page_num})
-                                    except: pass
-                            if fallback_chunks:
-                                return "\n\n".join(fallback_chunks)
-                        return "No relevant PDF materials found."
-                    return "\n\n".join(chunks)
-                except Exception as e:
-                    return f"Error searching PDFs: {e}"
+        if self._agent_executor is not None:
+            return self._agent_executor
 
-            @tool
-            def search_obsidian_graph(query: str) -> str:
-                """Search the personal Obsidian graph database for connected concepts and notes."""
-                graph_rag = self._get_graph_rag()
-                res = graph_rag.semantic_graph_search(query)
-                if res.get("citations"):
-                    self._current_citations.extend(res["citations"])
-                return res["context"]
-                
-            @tool
-            def scan_obsidian_tasks() -> str:
-                """Scan the entire Obsidian vault for pending or completed tasks (checkboxes - [ ] or - [x])."""
-                from config import OBSIDIAN_VAULT_DIR
-                vault_path = Path(OBSIDIAN_VAULT_DIR)
-                checkbox_notes = []
-                if vault_path.exists():
-                    for note_file in vault_path.glob("*.md"):
-                        try:
-                            content = note_file.read_text(encoding="utf-8")
-                            if "- [ ]" in content or "- [x]" in content:
-                                checkbox_notes.append(f"--- {note_file.name} ---\n{content}")
-                                self._current_citations.append({"source": f"Obsidian: {note_file.name}", "page": "Task Note"})
-                        except: pass
-                if checkbox_notes:
-                    return "\n".join(checkbox_notes)
-                return "No tasks found."
-                
-            @tool
-            def list_obsidian_notes() -> str:
-                """List all available markdown notes in the Obsidian vault."""
-                from config import OBSIDIAN_VAULT_DIR
-                vault_path = Path(OBSIDIAN_VAULT_DIR)
-                if not vault_path.exists():
-                    return "Vault directory not found."
-                notes = [f.name for f in vault_path.glob("*.md")]
-                if notes:
-                    return "Available notes: \n" + "\n".join(notes)
-                return "No notes found in the vault."
-                
-            @tool
-            def read_obsidian_note(note_title: str) -> str:
-                """Read the exact, raw markdown content of a specific Obsidian note. Provide the note title (with or without .md)."""
-                from config import OBSIDIAN_VAULT_DIR
-                vault_path = Path(OBSIDIAN_VAULT_DIR)
-                if not note_title.lower().endswith(".md"):
-                    note_title += ".md"
-                
-                note_file = vault_path / note_title
-                if not note_file.exists():
-                    # Try case-insensitive search
-                    for f in vault_path.glob("*.md"):
-                        if f.name.lower() == note_title.lower():
-                            note_file = f
-                            break
-                            
-                if note_file.exists():
+        llm = self._get_llm()
+        
+        from langchain_core.tools import tool
+        
+        @tool
+        def search_pdf_materials(query: str) -> str:
+            """Search uploaded PDF textbooks and study materials for factual knowledge."""
+            if not self.index_ready():
+                return "No PDFs indexed."
+            try:
+                vectorstore = self._load_vectorstore()
+                docs = vectorstore.similarity_search_with_score(query, k=5)
+                chunks = []
+                citations_list = current_citations_var.get()
+                for doc, score in docs:
+                    if score >= 0.70:
+                        chunks.append(doc.page_content)
+                        if citations_list is not None:
+                            citations_list.append({"source": doc.metadata.get("source"), "page": doc.metadata.get("page")})
+                if not chunks:
+                    # Fallback for generic/meta queries: fetch page 1 and page 2 of all indexed PDFs as context
+                    status = self.get_index_status()
+                    indexed_files = status.get("indexed_files", [])
+                    if indexed_files:
+                        fallback_chunks = []
+                        for filename in indexed_files:
+                            for page_num in [1, 2]:
+                                try:
+                                    res_docs = vectorstore.similarity_search(
+                                        query="title overview introduction index",
+                                        k=1,
+                                        filter={"source": filename, "page": page_num}
+                                    )
+                                    if res_docs:
+                                        fallback_chunks.append(f"--- File: {filename} (Page {page_num}) ---\n{res_docs[0].page_content}")
+                                        if citations_list is not None:
+                                            citations_list.append({"source": filename, "page": page_num})
+                                except: pass
+                        if fallback_chunks:
+                            return "\n\n".join(fallback_chunks)
+                    return "No relevant PDF materials found."
+                return "\n\n".join(chunks)
+            except Exception as e:
+                return f"Error searching PDFs: {e}"
+
+        @tool
+        def search_obsidian_graph(query: str) -> str:
+            """Search the personal Obsidian graph database for connected concepts and notes."""
+            graph_rag = self._get_graph_rag()
+            res = graph_rag.semantic_graph_search(query)
+            citations_list = current_citations_var.get()
+            if res.get("citations") and citations_list is not None:
+                citations_list.extend(res["citations"])
+            return res["context"]
+            
+        @tool
+        def scan_obsidian_tasks() -> str:
+            """Scan the entire Obsidian vault for pending or completed tasks (checkboxes - [ ] or - [x])."""
+            from config import OBSIDIAN_VAULT_DIR
+            vault_path = Path(OBSIDIAN_VAULT_DIR)
+            checkbox_notes = []
+            citations_list = current_citations_var.get()
+            if vault_path.exists():
+                for note_file in vault_path.glob("*.md"):
                     try:
                         content = note_file.read_text(encoding="utf-8")
-                        self._current_citations.append({"source": f"Obsidian: {note_file.name}", "page": "Raw Note"})
-                        return content
-                    except Exception as e:
-                        return f"Error reading note: {e}"
-                return f"Note '{note_title}' not found in the vault."
-                
-            @tool
-            def list_indexed_pdfs() -> str:
-                """List the filenames of all PDF files that are currently uploaded and indexed in the system."""
-                status = self.get_index_status()
-                indexed = status.get("indexed_files", [])
-                if not indexed:
-                    return "No PDFs are currently indexed."
-                return "Indexed PDF Files:\n" + "\n".join(f"- {name}" for name in indexed)
-                
-            from langgraph.prebuilt import create_react_agent
-            system_message = (
-                "You are an expert personal study assistant. You have access to tools to search the user's Obsidian notes, PDF materials, and tasks.\n"
-                "Use the search tools when you need to retrieve factual information from study materials or notes to answer the user's questions.\n"
-                "If the user's query can be answered using general knowledge or does not require searching, respond directly."
-            )
+                        if "- [ ]" in content or "- [x]" in content:
+                            checkbox_notes.append(f"--- {note_file.name} ---\n{content}")
+                            if citations_list is not None:
+                                citations_list.append({"source": f"Obsidian: {note_file.name}", "page": "Task Note"})
+                    except: pass
+            if checkbox_notes:
+                return "\n".join(checkbox_notes)
+            return "No tasks found."
             
-            self._agent_executor = create_react_agent(llm, tools=[search_pdf_materials, search_obsidian_graph, scan_obsidian_tasks, list_obsidian_notes, read_obsidian_note, list_indexed_pdfs], prompt=system_message)
+        @tool
+        def list_obsidian_notes() -> str:
+            """List all available markdown notes in the Obsidian vault."""
+            from config import OBSIDIAN_VAULT_DIR
+            vault_path = Path(OBSIDIAN_VAULT_DIR)
+            if not vault_path.exists():
+                return "Vault directory not found."
+            notes = [f.name for f in vault_path.glob("*.md")]
+            if notes:
+                return "Available notes: \n" + "\n".join(notes)
+            return "No notes found in the vault."
             
+        @tool
+        def read_obsidian_note(note_title: str) -> str:
+            """Read the exact, raw markdown content of a specific Obsidian note. Provide the note title (with or without .md)."""
+            from config import OBSIDIAN_VAULT_DIR
+            vault_path = Path(OBSIDIAN_VAULT_DIR)
+            if not note_title.lower().endswith(".md"):
+                note_title += ".md"
+            
+            note_file = vault_path / note_title
+            if not note_file.exists():
+                # Try case-insensitive search
+                for f in vault_path.glob("*.md"):
+                    if f.name.lower() == note_title.lower():
+                        note_file = f
+                        break
+                        
+            if note_file.exists():
+                try:
+                    content = note_file.read_text(encoding="utf-8")
+                    citations_list = current_citations_var.get()
+                    if citations_list is not None:
+                        citations_list.append({"source": f"Obsidian: {note_file.name}", "page": "Raw Note"})
+                    return content
+                except Exception as e:
+                    return f"Error reading note: {e}"
+            return f"Note '{note_title}' not found in the vault."
+            
+        @tool
+        def list_indexed_pdfs() -> str:
+            """List the filenames of all PDF files that are currently uploaded and indexed in the system."""
+            status = self.get_index_status()
+            indexed = status.get('indexed_files', [])
+            if not indexed:
+                return "No PDFs are currently indexed."
+            return "Indexed PDF Files:\n" + "\n".join(f"- {name}" for name in indexed)
+            
+        from langgraph.prebuilt import create_react_agent
+        system_message = (
+            "You are an expert personal study assistant. You have access to tools to search the user's Obsidian notes, PDF materials, and tasks.\n"
+            "Use the search tools when you need to retrieve factual information from study materials or notes to answer the user's questions.\n"
+            "If the user's query can be answered using general knowledge or does not require searching, respond directly."
+        )
+        
+        self._agent_executor = create_react_agent(llm, tools=[search_pdf_materials, search_obsidian_graph, scan_obsidian_tasks, list_obsidian_notes, read_obsidian_note, list_indexed_pdfs], prompt=system_message)
         return self._agent_executor
 
     def reload(self) -> None:
@@ -282,6 +307,9 @@ class RAGAgent:
             if pdf_name in processed:
                 continue
             
+            pdf_base_name = Path(pdf_name).stem
+            clean_pdf_base = re.sub(r'[\\/*?:"<>|]', "", pdf_base_name).strip()
+            
             logger.info(f"Extracting key concepts from {pdf_name} to generate Obsidian notes...")
             # Locate cached text file
             txt_file = cache_dir / f"{pdf_name}_ocr_False.txt"
@@ -293,34 +321,39 @@ class RAGAgent:
                 continue
 
             try:
-                # Read the first 25,000 characters to extract core concepts from intro/syllabus/outcomes
+                # Read the first 10,000 characters to extract core concepts from intro/syllabus/outcomes
                 full_text = txt_file.read_text(encoding="utf-8")
-                sample_text = full_text[:25000]
+                sample_text = full_text[:10000]
 
                 # Initialize LLM
                 api_key = self._get_groq_key()
-                llm = ChatGroq(groq_api_key=api_key, model="llama-3.1-8b-instant", temperature=0.0)
+                llm = ChatGroq(
+                    groq_api_key=api_key, 
+                    model="llama-3.1-8b-instant", 
+                    temperature=0.0,
+                    model_kwargs={"response_format": {"type": "json_object"}}
+                )
                 
                 # Define system message
                 system_msg = (
-                    "You are an expert academic curriculum analyzer. Your task is to analyze the introductory text "
-                    "and syllabus of a study material PDF, identify the core concepts/topics, and generate structured "
-                    "atomic Markdown study notes for each key concept that is not already present.\n\n"
-                    "Return the output as a valid JSON object with a key 'notes' containing a list of objects. "
-                    "Each object in the 'notes' list MUST have:\n"
-                    "1. 'title': A concise 2-4 word concept name (e.g. 'Cloud Service Models').\n"
-                    "2. 'tags': A list of tags (e.g. ['#cloud', '#architecture']).\n"
-                    "3. 'content': A detailed study note in Markdown format describing this concept. Include YAML frontmatter at the top of the content with title, tags, and summary.\n\n"
-                    "Example output format:\n"
-                    "{\n"
-                    "  \"notes\": [\n"
-                    "    {\n"
-                    "      \"title\": \"Cloud Service Models\",\n"
-                    "      \"tags\": [\"#cloud\", \"#architecture\"],\n"
-                    "      \"content\": \"---\\ntitle: Cloud Service Models\\ntags: [#cloud, #architecture]\\nsummary: Explanation of IaaS, PaaS, and SaaS.\\n---\\n\\n# Cloud Service Models...\"\n"
-                    "    }\n"
-                    "  ]\n"
-                    "}"
+                    f"You are an expert academic curriculum analyzer. Your task is to analyze the introductory text "
+                    f"and syllabus of the study material PDF titled '{clean_pdf_base}', identify the core concepts/topics, "
+                    f"and generate structured atomic Markdown study notes for each key concept that is not already present.\n\n"
+                    f"Return the output as a valid JSON object with a key 'notes' containing a list of objects. "
+                    f"Each object in the 'notes' list MUST have:\n"
+                    f"1. 'title': A concise 2-4 word concept name (e.g. 'Cloud Service Models').\n"
+                    f"2. 'tags': A list of tags (e.g. ['#cloud', '#architecture']).\n"
+                    f"3. 'content': A detailed study note in Markdown format describing this concept. Include YAML frontmatter at the top of the content with title, tags, and summary. At the end of the content, include a '### Source' section linking back to the parent document: `- [[{clean_pdf_base}]]`.\n\n"
+                    f"Example output format:\n"
+                    f"{{\n"
+                    f"  \"notes\": [\n"
+                    f"    {{\n"
+                    f"      \"title\": \"Cloud Service Models\",\n"
+                    f"      \"tags\": [\"#cloud\", \"#architecture\"],\n"
+                    f"      \"content\": \"---\\ntitle: Cloud Service Models\\ntags: [#cloud, #architecture]\\nsummary: Explanation of IaaS, PaaS, and SaaS.\\n---\\n\\n# Cloud Service Models...\\n\\n### Source\\n- [[{clean_pdf_base}]]\"\n"
+                    f"    }}\n"
+                    f"  ]\n"
+                    f"}}"
                 )
                 
                 from langchain_core.messages import SystemMessage, HumanMessage
@@ -343,6 +376,7 @@ class RAGAgent:
                 data = json.loads(content)
                 notes_list = data.get("notes", [])
                 
+                generated_titles = []
                 for note_data in notes_list:
                     title = note_data.get("title", "").strip()
                     note_content = note_data.get("content", "").strip()
@@ -354,6 +388,10 @@ class RAGAgent:
                     if not clean_title:
                         continue
                     
+                    # Programmatically ensure the child note back-links to the parent source note
+                    if f"[[{clean_pdf_base}]]" not in note_content:
+                        note_content += f"\n\n### Source\n- [[{clean_pdf_base}]]\n"
+                    
                     note_file = vault_path / f"{clean_title}.md"
                     if not note_file.exists():
                         note_file.write_text(note_content, encoding="utf-8")
@@ -361,6 +399,29 @@ class RAGAgent:
                         new_notes_created = True
                     else:
                         logger.info(f"Note '{clean_title}' already exists. Skipping.")
+                    
+                    generated_titles.append(clean_title)
+                
+                # Generate parent index note linking all generated notes
+                if generated_titles:
+                    parent_note_file = vault_path / f"{clean_pdf_base}.md"
+                    parent_note_content = (
+                        f"---\n"
+                        f"title: {clean_pdf_base}\n"
+                        f"tags: [#source, #pdf-extraction]\n"
+                        f"summary: Central index of extracted concepts from {pdf_name}.\n"
+                        f"---\n\n"
+                        f"# Source: {clean_pdf_base}\n\n"
+                        f"This is the central index note for all concepts extracted from the study material: **{pdf_name}**.\n\n"
+                        f"## Extracted Concepts\n"
+                    )
+                    parent_note_content += "\n".join(f"- [[{title}]]" for title in sorted(generated_titles))
+                    parent_note_content += "\n"
+                    
+                    # Write/update the parent index note
+                    parent_note_file.write_text(parent_note_content, encoding="utf-8")
+                    logger.info(f"Auto-created parent source note: {parent_note_file.name}")
+                    new_notes_created = True
                 
                 processed.add(pdf_name)
             except Exception as ex:
@@ -383,7 +444,8 @@ class RAGAgent:
         self._session_store.pop(session_id, None)
 
     def ask(self, question: str, session_id: str = "default_session", mode: str = "pdf", chat_history: list = None) -> ChatResult:
-        self._current_citations = []
+        call_citations = []
+        token = current_citations_var.set(call_citations)
         try:
             from langchain_core.messages import HumanMessage, AIMessage
             formatted_messages = []
@@ -413,9 +475,12 @@ class RAGAgent:
                     raise e
         except Exception as e:
             return ChatResult(answer="", error=str(e))
+        finally:
+            current_citations_var.reset(token)
 
     def ask_stream(self, question: str, session_id: str = "default_session", citations: list = None, mode: str = "pdf", chat_history: list = None):
-        self._current_citations = []
+        call_citations = []
+        token = current_citations_var.set(call_citations)
         try:
             from langchain_core.messages import HumanMessage, AIMessage
             formatted_messages = []
@@ -439,11 +504,10 @@ class RAGAgent:
                             if msg.content and not getattr(msg, 'tool_calls', None) and not getattr(msg, 'tool_call_chunks', None):
                                 yield msg.content
 
-                                
-                    if citations is not None and self._current_citations:
+                    if citations is not None and call_citations:
                         # De-duplicate citations safely
                         seen = set()
-                        for c in self._current_citations:
+                        for c in call_citations:
                             key = f"{c.get('source')}-{c.get('page')}"
                             if key not in seen:
                                 seen.add(key)
@@ -461,6 +525,8 @@ class RAGAgent:
                     return
         except Exception as e:
             yield f"[ERROR] {str(e)}"
+        finally:
+            current_citations_var.reset(token)
 
     def save_concepts_to_obsidian(self, question: str, answer: str, citations: list) -> dict:
         import re
@@ -496,15 +562,18 @@ class RAGAgent:
             return {"success": False, "error": str(e)}
 
     def sync_obsidian_vault(self) -> dict:
+        from git_sync import sync_obsidian_repo, push_obsidian_vault
         from linker_trigger import run_obsidian_linker_sync
-        from git_sync import sync_obsidian_repo
         import subprocess
         try:
+            # 1. Push any locally generated notes (like those extracted from PDFs) to GitHub
+            push_obsidian_vault()
+            # 2. Trigger the Render sync (which will pull from GitHub, process, and push back)
             success = run_obsidian_linker_sync()
             if success:
-                # Pull the updated cache file and notes from GitHub first
+                # 3. Pull the updated cache file and notes from GitHub back to local drive
                 sync_obsidian_repo()
-                # Trigger neo4j_sync.py to push the new cache to Neo4j
+                # 4. Trigger neo4j_sync.py to push the new cache to Neo4j
                 subprocess.run(["python", "neo4j_sync.py"], check=False)
                 self.reload()
                 return {"success": True}

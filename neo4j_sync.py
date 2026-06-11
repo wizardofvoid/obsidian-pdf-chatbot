@@ -9,6 +9,7 @@ from config import OBSIDIAN_CACHE_FILE
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+
 class Neo4jSync:
     def __init__(self):
         self.uri = os.getenv("NEO4J_URI")
@@ -32,15 +33,16 @@ class Neo4jSync:
     def close(self):
         if self.driver:
             self.driver.close()
+            self.driver = None
 
     def sync(self) -> bool:
         if not self.connect():
             return False
-            
+
         if not self.cache_file.exists():
             logger.warning("Cache file %s not found. Run Obsidian Linker first.", self.cache_file)
             return False
-            
+
         try:
             with open(self.cache_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -52,72 +54,83 @@ class Neo4jSync:
         links = data.get("links", [])
         concepts = data.get("concepts", [])
 
-        # Build concepts map for node summaries
-        explanations = {}
+        # Build per-note summary strings
+        explanations: dict[str, list[str]] = {}
         for c in concepts:
             note = c.get("source_note")
             if note:
-                if note not in explanations:
-                    explanations[note] = []
-                explanations[note].append(f"{c.get('concept_name')}: {c.get('explanation')}")
-        
+                explanations.setdefault(note, []).append(
+                    f"{c.get('concept_name')}: {c.get('explanation')}"
+                )
         note_summaries = {k: "; ".join(v) for k, v in explanations.items()}
+
+        valid_files = set(files.keys())
+        nodes_data = [
+            {"name": name, "summary": note_summaries.get(name, "")}
+            for name in valid_files
+        ]
+
+        # Group links by sanitized relationship type up front (Python-side, zero Cypher overhead)
+        links_by_type: dict[str, list[dict]] = {}
+        for lnk in links:
+            src, dst = lnk.get("from_note"), lnk.get("to_note")
+            if src not in valid_files or dst not in valid_files:
+                continue
+            rel = str(lnk.get("relationship", "LINKS_TO")).upper().replace(" ", "_").replace("-", "_") or "LINKS_TO"
+            links_by_type.setdefault(rel, []).append({"from": src, "to": dst})
 
         try:
             with self.driver.session() as session:
-                # 1. Clear existing graph to ensure exact parity with current vault state
-                # Note: In a massive vault, DETACH DELETE might be slow, but for Obsidian it's fast enough.
+                # ----------------------------------------------------------------
+                # 1. Clear existing graph
+                # ----------------------------------------------------------------
                 session.run("MATCH (n:Note) DETACH DELETE n")
 
-                # 2. Insert Nodes
-                nodes_data = [{"name": name, "summary": note_summaries.get(name, "")} for name in files.keys()]
+                # ----------------------------------------------------------------
+                # 2. Bulk-upsert nodes in a single UNWIND statement
+                # ----------------------------------------------------------------
                 if nodes_data:
-                    session.run('''
+                    session.run(
+                        """
                         UNWIND $nodes AS n
                         MERGE (note:Note {name: n.name})
                         SET note.summary = n.summary
-                    ''', nodes=nodes_data)
+                        """,
+                        nodes=nodes_data,
+                    )
+                    logger.info("Upserted %s Note nodes.", len(nodes_data))
 
-                # 3. Insert Links dynamically based on relationship type
-                valid_files = set(files.keys())
-                
-                # Group links by relationship type
-                links_by_type = {}
-                for l in links:
-                    if l.get("from_note") in valid_files and l.get("to_note") in valid_files:
-                        # Sanitize relationship type (e.g., uses -> USES)
-                        rel_type = str(l.get("relationship", "LINKS_TO")).upper().replace(" ", "_").replace("-", "_")
-                        # Fallback if empty
-                        if not rel_type:
-                            rel_type = "LINKS_TO"
-                            
-                        if rel_type not in links_by_type:
-                            links_by_type[rel_type] = []
-                            
-                        links_by_type[rel_type].append({"from": l["from_note"], "to": l["to_note"]})
-                
-                total_links_inserted = 0
+                # ----------------------------------------------------------------
+                # 3. Bulk-upsert relationships per type
+                #    Each type requires its own Cypher statement (dynamic rel types),
+                #    but within a type we still do a single UNWIND batch.
+                # ----------------------------------------------------------------
+                total_links = 0
                 for rel_type, type_links in links_by_type.items():
-                    query = f'''
+                    session.run(
+                        f"""
                         UNWIND $links AS l
                         MATCH (from:Note {{name: l.from}})
-                        MATCH (to:Note {{name: l.to}})
+                        MATCH (to:Note   {{name: l.to}})
                         MERGE (from)-[:{rel_type}]->(to)
-                    '''
-                    session.run(query, links=type_links)
-                    total_links_inserted += len(type_links)
-                
-            logger.info("Successfully synced %s notes and %s links to Neo4j.", len(nodes_data), total_links_inserted)
-            success = True
+                        """,
+                        links=type_links,
+                    )
+                    total_links += len(type_links)
+
+            logger.info(
+                "Successfully synced %s notes and %s links to Neo4j.",
+                len(nodes_data), total_links
+            )
+            return True
+
         except Exception as e:
             logger.error("Error writing to Neo4j: %s", e)
-            success = False
+            return False
         finally:
             self.close()
-            
-        return success
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    sync = Neo4jSync()
-    sync.sync()
+    Neo4jSync().sync()

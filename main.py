@@ -73,10 +73,10 @@ def init_config():
 
 def main():
     init_config()
-    st.set_page_config(page_title="Obsidian & PDF Brain Chat", layout="wide")
+    st.set_page_config(page_title="Engram", layout="wide")
     inject_premium_styles()
     
-    st.title("Obsidian & PDF Study Brain")
+    st.title("Engram")
     
     agent = get_agent()
     
